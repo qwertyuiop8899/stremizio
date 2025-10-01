@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="it">
+<head> 
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="/logo.png">
+    <title>Stremizio | Configurazione</title>
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --surface-color: #2a2a2a;
+            --primary-color: #ae79ff;
+            --text-color: #e0e0e0;
+            --text-muted-color: #a0a0a0;
+            --border-color: #444;
+            --success-color: #4EC9B0;
+            --error-color: #FF6B6B;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            width: 100%;
+            max-width: 500px;
+            padding: 30px;
+            background-color: var(--surface-color);
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-color);
+        }
+        .logo {
+            display: block;
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 15px auto;
+            border-radius: 16px;
+        }
+        h1 {
+            color: var(--primary-color);
+            text-align: center;
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+        .description {
+            text-align: left;
+            margin-bottom: 25px;
+            padding: 15px;
+            background-color: var(--bg-color);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+        .description h4 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            color: var(--primary-color);
+        }
+        .description ul { padding-left: 20px; margin: 0; }
+        .description li { margin-bottom: 8px; color: var(--text-muted-color); }
+        .description li:last-child { margin-bottom: 0; }
+        p { text-align: center; color: var(--text-muted-color); margin-bottom: 20px; }
+        #status {
+            text-align: center;
+            margin: 15px 0;
+            font-weight: 500;
+            min-height: 1.2em;
+            transition: color 0.3s ease;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 15px;
+            background-color: var(--bg-color);
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-color);
+            font-size: 1em;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(174, 121, 255, 0.2);
+        }
+        .button-group { display: flex; justify-content: center; gap: 10px; }
+        button {
+            background-color: var(--primary-color);
+            color: #fff;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: background-color 0.3s ease, transform 0.1s ease;
+        }
+        button:hover:not(:disabled) { background-color: #9962e8; }
+        button:active:not(:disabled) { transform: scale(0.98); }
+        button:disabled { background-color: #555; color: #888; cursor: not-allowed; }
+        #link-container { display: none; margin-top: 20px; }
+        textarea { resize: vertical; }
+        .links { text-align: center; margin-top: 25px; }
+        a { color: var(--primary-color); text-decoration: none; transition: color 0.3s ease; }
+        a:hover { color: #c5a5ff; }
+    </style>
+</head>
+<body>
+    <div class="container"> 
+        <img src="/logo.png" alt="Stremizio Logo" class="logo">
+        <h1>Stremizio 2.0</h1>
+        <div class="description">
+            <h4>Caratteristiche principali:</h4>
+            <ul>
+                <li><strong>Multi-sorgente:</strong> Cerca su Il Corsaro Nero, UIndex e Knaben per la massima copertura.</li>
+                <li><strong>Ottimizzato per l'Italia:</strong> Dà priorità ai contenuti in lingua italiana.</li>
+                <li><strong>Supporto Real-Debrid:</strong> Abilita lo streaming istantaneo e sicuro, senza usare P2P.</li>
+                <li><strong>Attenzione:</strong> In mancanza del token di Real-Debrid verrà usato lo streaming P2P.</li>
+                <li><strong>Ordinamento Intelligente:</strong> I risultati sono ordinati per qualità, lingua e popolarità.</li>
+            </ul>
+        </div>
+        <p>Per iniziare, inserisci la tua TMDB API Key (obbligatoria) e la tua Real-Debrid Key (opzionale).</p>
+        <div id="status"></div>
+        <input id="tmdb_key" placeholder="TMDB API Key" type="text" autocomplete="off">
+        <input id="rd_key" placeholder="Real-Debrid Key (opzionale)" type="password">
+        <div class="button-group">
+            <button id="install_button" disabled>Installa Addon</button>
+            <button id="copy_button" disabled>Copia Link</button>
+        </div>
+        <div id="link-container">
+            <p><small>Link di installazione generato:</small></p>
+            <textarea id="install_link_display" rows="3" readonly></textarea>
+        </div>
+        <div class="links">
+            <a href="https://www.themoviedb.org/settings/api" target="_blank">Ottieni TMDB API Key</a> | 
+            <a href="https://real-debrid.com/apitoken" target="_blank">Ottieni Real-Debrid API Key</a>
+        </div>
+    </div>
+    <script>
+        const tmdbKeyInput = document.getElementById("tmdb_key");
+        const rdKeyInput = document.getElementById("rd_key");
+        const installButton = document.getElementById("install_button");
+        const copyButton = document.getElementById("copy_button");
+        const statusEl = document.getElementById("status");
+        const linkContainer = document.getElementById("link-container");
+        const installLinkDisplay = document.getElementById("install_link_display");
+
+        function updateInstallLink() {
+            const tmdbKey = tmdbKeyInput.value.trim();
+            const rdKey = rdKeyInput.value.trim();
+
+            if (tmdbKey) {
+                const config = { tmdb_key: tmdbKey };
+                if (rdKey) config.rd_key = rdKey;
+                
+                const encodedConfig = btoa(JSON.stringify(config));
+                const installUrl = `stremio://${window.location.host}/${encodedConfig}/manifest.json`;
+                
+                installLinkDisplay.value = installUrl;
+                linkContainer.style.display = "block";
+                installButton.disabled = false;
+                copyButton.disabled = false;
+                statusEl.textContent = "✓ Configurazione pronta!";
+                statusEl.style.color = 'var(--success-color)';
+                tmdbKeyInput.style.borderColor = 'var(--success-color)';
+            } else {
+                linkContainer.style.display = "none";
+                installButton.disabled = true;
+                copyButton.disabled = true;
+                statusEl.textContent = "Inserisci la TMDB API Key per continuare";
+                statusEl.style.color = 'var(--error-color)';
+                tmdbKeyInput.style.borderColor = 'var(--error-color)';
+            }
+        }
+
+        tmdbKeyInput.addEventListener('input', updateInstallLink);
+        rdKeyInput.addEventListener('input', updateInstallLink);
+
+        installButton.addEventListener('click', () => {
+            if (installLinkDisplay.value) window.location.href = installLinkDisplay.value;
+        });
+
+        copyButton.addEventListener('click', () => {
+            if (installLinkDisplay.value) {
+                navigator.clipboard.writeText(installLinkDisplay.value).then(() => {
+                    statusEl.textContent = "✓ Link copiato negli appunti!";
+                    const originalText = copyButton.textContent;
+                    copyButton.textContent = "Copiato!";
+                    setTimeout(() => {
+                        copyButton.textContent = originalText;
+                        statusEl.textContent = "✓ Configurazione pronta!";
+                    }, 2000);
+                });
+            }
+        });
+    </script>
+</body>
+</html>
