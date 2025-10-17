@@ -1423,12 +1423,13 @@ function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
     }
     
     try {
-        // MediaFlow Proxy format: {mediaflow_url}/proxy/stream?d={base64_encoded_direct_url}&password={password}
+        // MediaFlow Proxy format: {mediaflow_url}/proxy/stream?d={base64_encoded_direct_url}&api_password={password}
         const encodedUrl = btoa(directUrl);
         const mediaflowUrl = mediaflowConfig.url.replace(/\/$/, ''); // Remove trailing slash
         const password = mediaflowConfig.password || '';
         
-        const proxiedUrl = `${mediaflowUrl}/proxy/stream?d=${encodedUrl}&password=${encodeURIComponent(password)}`;
+        // MediaFlow Proxy uses 'api_password' parameter for authentication
+        const proxiedUrl = `${mediaflowUrl}/proxy/stream?d=${encodedUrl}&api_password=${encodeURIComponent(password)}`;
         
         console.log(`🔀 Proxying URL through MediaFlow`);
         return proxiedUrl;
