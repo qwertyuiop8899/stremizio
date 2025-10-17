@@ -1399,20 +1399,26 @@ class Torbox {
 
     async createDownload(torrentId, fileId = null) {
         console.log(`📦 [Torbox] Creating download link for torrent ${torrentId}${fileId ? ` file ${fileId}` : ''}...`);
-        // Torbox API v1: POST /torrents/requestdl
-        const body = {
-            torrent_id: parseInt(torrentId),
-            file_id: fileId ? parseInt(fileId) : undefined,
-            zip_link: false
-        };
+        
+        // Torbox API v1: The correct endpoint is /torrents/requestdl with query params
+        // URL format: /torrents/requestdl?token={api_key}&torrent_id={id}&file_id={file_id}&zip_link=false
+        const params = new URLSearchParams({
+            token: this.apiKey,
+            torrent_id: torrentId.toString(),
+            zip_link: 'false'
+        });
+        
+        if (fileId) {
+            params.set('file_id', fileId.toString());
+        }
+        
+        const url = `${this.baseUrl}/torrents/requestdl?${params}`;
 
-        const response = await fetch(`${this.baseUrl}/torrents/requestdl`, {
-            method: 'POST',
+        const response = await fetch(url, {
+            method: 'GET',
             headers: {
-                'Authorization': `Bearer ${this.apiKey}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(body)
+                'Authorization': `Bearer ${this.apiKey}`
+            }
         });
 
         if (!response.ok) {
@@ -1423,8 +1429,15 @@ class Torbox {
 
         const data = await response.json();
         if (!data.success) {
-            console.error(`📦 ❌ Torbox error:`, data.error || 'Unknown error');
-            throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
+            const errorMsg = data.error || data.detail || 'Unknown error';
+            console.error(`📦 ❌ Torbox error:`, errorMsg);
+            
+            // Handle specific errors
+            if (errorMsg === 'DATABASE_ERROR' || data.detail?.includes('DATABASE_ERROR')) {
+                throw new Error('Torrent non disponibile o scaduto. Prova a scaricarlo di nuovo.');
+            }
+            
+            throw new Error(`Torbox error: ${errorMsg}`);
         }
         
         console.log(`📦 ✓ Download link created successfully`);
@@ -3316,8 +3329,30 @@ export default async function handler(req, res) {
                 const torbox = new Torbox(userConfig.torbox_key);
                 const torrentInfo = await torbox.getTorrentInfo(torrentId);
 
+                console.log(`📦 [Torbox] Torrent info:`, {
+                    id: torrentInfo.id,
+                    name: torrentInfo.name,
+                    download_state: torrentInfo.download_state,
+                    download_finished: torrentInfo.download_finished,
+                    expires_at: torrentInfo.expires_at,
+                    active: torrentInfo.active
+                });
+
+                // Check if torrent is expired or has issues
+                if (torrentInfo.download_state === 'expired') {
+                    console.warn(`📦 ⚠️ Torrent ${torrentId} is expired`);
+                    return res.status(410).send('<h1>Torrent Scaduto</h1><p>Questo torrent è scaduto da Torbox. Cercalo di nuovo per scaricarlo.</p>');
+                }
+
+                if (torrentInfo.download_state === 'reported missing' || torrentInfo.download_state === 'error') {
+                    console.warn(`📦 ⚠️ Torrent ${torrentId} has error state: ${torrentInfo.download_state}`);
+                    return res.status(410).send(`<h1>Torrent Non Disponibile</h1><p>Stato: ${torrentInfo.download_state}. Prova a cercarlo di nuovo.</p>`);
+                }
+
                 if (!torrentInfo.download_finished) {
-                    throw new Error('Il torrent non è ancora completato.');
+                    const progress = Math.round(torrentInfo.progress * 100);
+                    console.log(`📦 ⏳ Torrent ${torrentId} still downloading: ${progress}%`);
+                    return res.status(202).send(`<h1>Download in Corso</h1><p>Il torrent è al ${progress}%. Riprova tra qualche minuto.</p>`);
                 }
 
                 const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
