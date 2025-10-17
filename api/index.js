@@ -1389,8 +1389,8 @@ class Torbox {
         const torrent = torrents.find(t => t.id === parseInt(torrentId));
         
         if (!torrent) {
-            console.error(`📦 ❌ Torrent ${torrentId} not found in Torbox`);
-            throw new Error(`Torrent ${torrentId} not found in Torbox`);
+            console.log(`📦 ❌ Torrent ${torrentId} not found - may have been deleted or expired`);
+            return null;
         }
         
         console.log(`📦 ✓ Found torrent: ${torrent.name} (${torrent.download_state})`);
@@ -1399,6 +1399,13 @@ class Torbox {
 
     async createDownload(torrentId, fileId = null) {
         console.log(`📦 [Torbox] Creating download link for torrent ${torrentId}${fileId ? ` file ${fileId}` : ''}...`);
+        
+        // First check if torrent exists
+        const torrentInfo = await this.getTorrentInfo(torrentId);
+        if (!torrentInfo) {
+            console.log(`📦 ❌ Cannot create download link - torrent ${torrentId} not found`);
+            throw new Error(`Torrent ${torrentId} not found or expired`);
+        }
         
         // Torbox API v1: The correct endpoint is /torrents/requestdl with query params
         // URL format: /torrents/requestdl?token={api_key}&torrent_id={id}&file_id={file_id}&zip_link=false
