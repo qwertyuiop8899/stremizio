@@ -513,6 +513,151 @@ async function fetchKnabenData(searchQuery, type = 'movie') {
 
 // --- FINE NUOVA SEZIONE ---
 
+// --- NUOVA SEZIONE: JACKETTIO INTEGRATION ---
+
+class Jackettio {
+    constructor(baseUrl, apiKey, password = null) {
+        this.baseUrl = baseUrl; // e.g., "https://eschiano-jackett.elfhosted.com"
+        this.apiKey = apiKey;
+        this.password = password; // Optional password for authenticated instances
+    }
+
+    async search(query, category = null, italianOnly = false) {
+        if (!query) return [];
+        
+        try {
+            const params = new URLSearchParams({
+                apikey: this.apiKey,
+                q: query,
+                ...(category && { cat: category }) // 2000=Movies, 5000=TV, 5070=Anime
+            });
+            
+            const url = `${this.baseUrl}/api/v2.0/indexers/all/results?${params}`;
+            
+            console.log(`🔍 [Jackettio] Searching for: "${query}" (category: ${category || 'all'}) ${italianOnly ? '[ITALIAN ONLY]' : ''}`);
+            
+            const headers = {
+                'User-Agent': 'Stremizio/2.0'
+            };
+            
+            // Add password if provided (for authenticated instances)
+            if (this.password) {
+                headers['Authorization'] = `Basic ${btoa(`api:${this.password}`)}`;
+            }
+            
+            const response = await fetch(url, { headers });
+
+            if (!response.ok) {
+                throw new Error(`Jackettio API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            
+            if (!data.Results || data.Results.length === 0) {
+                console.log('🔍 [Jackettio] No results found.');
+                return [];
+            }
+
+            console.log(`🔍 [Jackettio] Found ${data.Results.length} raw results.`);
+            
+            // Parse Jackett results to our standard format
+            const streams = data.Results.map(result => {
+                // Jackett può restituire sia magnet che torrent file
+                let magnetLink = result.MagnetUri || result.Link;
+                
+                // Se è un .torrent file, prova a estrarre l'hash
+                if (!magnetLink || !magnetLink.startsWith('magnet:')) {
+                    console.log(`⚠️ [Jackettio] Skipping non-magnet result: ${result.Title}`);
+                    return null;
+                }
+
+                const infoHash = extractInfoHash(magnetLink);
+                if (!infoHash) {
+                    console.log(`⚠️ [Jackettio] Failed to extract hash from: ${result.Title}`);
+                    return null;
+                }
+
+                // ✅ FILTER: Italian only check
+                if (italianOnly && !isItalian(result.Title)) {
+                    console.log(`🚫 [Jackettio] Skipping non-Italian: ${result.Title}`);
+                    return null;
+                }
+
+                // Parse seeders/peers
+                const seeders = result.Seeders || 0;
+                const leechers = result.Peers || 0;
+                
+                // Parse size
+                const sizeInBytes = result.Size || 0;
+                const sizeStr = formatBytes(sizeInBytes);
+
+                // Determine category
+                let outputCategory = 'Unknown';
+                const categoryDesc = (result.CategoryDesc || '').toLowerCase();
+                if (categoryDesc.includes('movie')) {
+                    outputCategory = 'Movies';
+                } else if (categoryDesc.includes('tv') || categoryDesc.includes('series')) {
+                    outputCategory = 'TV';
+                } else if (categoryDesc.includes('anime')) {
+                    outputCategory = 'Anime';
+                }
+
+                return {
+                    magnetLink: magnetLink,
+                    websiteTitle: result.Title,
+                    title: result.Title,
+                    filename: result.Title,
+                    quality: extractQuality(result.Title),
+                    size: sizeStr,
+                    source: 'Jackettio',
+                    seeders: seeders,
+                    leechers: leechers,
+                    infoHash: infoHash,
+                    mainFileSize: sizeInBytes,
+                    pubDate: result.PublishDate || new Date().toISOString(),
+                    categories: [outputCategory]
+                };
+            }).filter(Boolean);
+
+            console.log(`🔍 [Jackettio] Successfully parsed ${streams.length} ${italianOnly ? 'ITALIAN ' : ''}streams.`);
+            return streams;
+
+        } catch (error) {
+            console.error(`❌ [Jackettio] Search failed:`, error.message);
+            return [];
+        }
+    }
+}
+
+async function fetchJackettioData(searchQuery, type = 'movie', jackettioInstance = null) {
+    if (!jackettioInstance) {
+        console.log('⚠️ [Jackettio] Instance not configured, skipping.');
+        return [];
+    }
+
+    try {
+        // Map type to Jackett category codes
+        let category = null;
+        if (type === 'movie') {
+            category = '2000'; // Movies
+        } else if (type === 'series') {
+            category = '5000'; // TV
+        } else if (type === 'anime') {
+            category = '5070'; // TV/Anime
+        }
+
+        // ✅ ONLY ITALIAN RESULTS
+        const results = await jackettioInstance.search(searchQuery, category, true);
+        return results;
+
+    } catch (error) {
+        console.error(`❌ Error in fetchJackettioData:`, error);
+        return [];
+    }
+}
+
+// --- FINE NUOVA SEZIONE ---
+
 // ✅ Advanced HTML Parsing (inspired by JSDOM approach in uiai.js)
 function parseUIndexHTML(html) {
     const results = [];
@@ -889,7 +1034,8 @@ class RealDebrid {
 
                 if (response.ok) {
                     batch.forEach(hash => {
-                        const cacheInfo = data[hash];
+                        const hashLower = hash.toLowerCase();
+                        const cacheInfo = data[hashLower];
                         const isCached = cacheInfo && cacheInfo.rd && cacheInfo.rd.length > 0;
                         let downloadLink = null;
                         let isActuallyCachedAndStreamable = false; // New flag to indicate if a streamable file was found
@@ -926,11 +1072,11 @@ class RealDebrid {
                                 downloadLink = bestFile.link;
                                 isActuallyCachedAndStreamable = true; // Found a streamable file
                             } else {
-                                console.warn(`⚠️ Torrent ${hash} is in RD cache but no suitable video file found for direct streaming.`);
+                                console.warn(`⚠️ Torrent ${hashLower} is in RD cache but no suitable video file found for direct streaming.`);
                             }
                         }
 
-                        results[hash] = {
+                        results[hashLower] = {
                             cached: isActuallyCachedAndStreamable, // Use the new flag
                             downloadLink: downloadLink,
                             service: 'Real-Debrid'
@@ -944,7 +1090,8 @@ class RealDebrid {
             } catch (error) {
                 console.error('Cache check failed:', error);
                 batch.forEach(hash => {
-                    results[hash] = { cached: false, downloadLink: null, service: 'Real-Debrid' };
+                    const hashLower = hash.toLowerCase();
+                    results[hashLower] = { cached: false, downloadLink: null, service: 'Real-Debrid' };
                 });
             }
         }
@@ -1036,6 +1183,258 @@ class RealDebrid {
         }
 
         return await response.json();
+    }
+}
+
+// ✅ Torbox API integration
+class Torbox {
+    constructor(apiKey) {
+        this.apiKey = apiKey;
+        this.baseUrl = 'https://api.torbox.app/v1/api';
+    }
+
+    async checkCache(hashes) {
+        if (!hashes || hashes.length === 0) return {};
+        
+        const results = {};
+        
+        // Torbox supports bulk check via POST
+        try {
+            const response = await fetch(`${this.baseUrl}/torrents/checkcached`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    hashes: hashes,
+                    format: 'object',
+                    list_files: true
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Torbox API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            
+            if (data.success && data.data) {
+                hashes.forEach(hash => {
+                    const cacheInfo = data.data[hash.toLowerCase()];
+                    const isCached = cacheInfo && cacheInfo.cached === true;
+                    let downloadLink = null;
+                    let isActuallyCachedAndStreamable = false;
+                    
+                    if (isCached && cacheInfo.files && cacheInfo.files.length > 0) {
+                        const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
+                        const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
+                        
+                        let bestFile = null;
+                        
+                        for (const file of cacheInfo.files) {
+                            const lowerName = file.name.toLowerCase();
+                            
+                            const hasVideoExtension = videoExtensions.some(ext => lowerName.endsWith(ext));
+                            if (!hasVideoExtension) continue;
+                            
+                            const isLikelyJunk = junkKeywords.some(junk => lowerName.includes(junk)) && file.size < 250 * 1024 * 1024;
+                            if (isLikelyJunk) continue;
+                            
+                            if (!bestFile || file.size > bestFile.size) {
+                                bestFile = file;
+                            }
+                        }
+                        
+                        if (bestFile) {
+                            // Store the hash and best file info for later retrieval
+                            downloadLink = hash; // We'll use this to request the actual download later
+                            isActuallyCachedAndStreamable = true;
+                        } else {
+                            console.warn(`⚠️ Torrent ${hash} is in Torbox cache but no suitable video file found.`);
+                        }
+                    }
+                    
+                    results[hash.toLowerCase()] = {
+                        cached: isActuallyCachedAndStreamable,
+                        downloadLink: downloadLink,
+                        service: 'Torbox',
+                        torboxData: cacheInfo // Store original data for file selection
+                    };
+                });
+            }
+        } catch (error) {
+            console.error('Torbox cache check failed:', error);
+            hashes.forEach(hash => {
+                results[hash.toLowerCase()] = { cached: false, downloadLink: null, service: 'Torbox' };
+            });
+        }
+        
+        return results;
+    }
+
+    async addTorrent(magnetLink) {
+        const response = await fetch(`${this.baseUrl}/torrents/createtorrent`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                magnet: magnetLink,
+                seed: 1 // Enable seeding
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Torbox API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
+        }
+        
+        return data.data;
+    }
+
+    async getTorrents() {
+        const response = await fetch(`${this.baseUrl}/torrents/mylist`, {
+            headers: { 
+                'Authorization': `Bearer ${this.apiKey}` 
+            }
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Failed to get torrents list from Torbox: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
+        }
+        
+        return data.data || [];
+    }
+
+    async deleteTorrent(torrentId) {
+        const response = await fetch(`${this.baseUrl}/torrents/controltorrent`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                torrent_id: torrentId,
+                operation: 'delete'
+            })
+        });
+
+        const data = await response.json();
+        if (!data.success) {
+            console.error(`Failed to delete torrent ${torrentId} from Torbox.`);
+        }
+    }
+
+    async getTorrentInfo(torrentId) {
+        const torrents = await this.getTorrents();
+        const torrent = torrents.find(t => t.id === parseInt(torrentId));
+        
+        if (!torrent) {
+            throw new Error(`Torrent ${torrentId} not found in Torbox`);
+        }
+        
+        return torrent;
+    }
+
+    async createDownload(torrentId, fileId = null) {
+        const body = {
+            torrent_id: parseInt(torrentId),
+            file_id: fileId ? parseInt(fileId) : undefined,
+            zip_link: false
+        };
+
+        const response = await fetch(`${this.baseUrl}/torrents/requestdl`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${this.apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            throw new Error(`Torbox API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
+        }
+        
+        return data.data; // Returns direct download URL
+    }
+}
+
+// ✅ Debrid Service Factory - Supports both services simultaneously
+function createDebridServices(config) {
+    const services = {
+        realdebrid: null,
+        torbox: null,
+        useRealDebrid: false,
+        useTorbox: false,
+        mediaflowProxy: null // NEW: MediaFlow Proxy config
+    };
+    
+    // Check RealDebrid
+    if (config.use_rd && config.rd_key && config.rd_key.length > 5) {
+        console.log('🔵 Real-Debrid enabled');
+        services.realdebrid = new RealDebrid(config.rd_key);
+        services.useRealDebrid = true;
+    }
+    
+    // Check Torbox
+    if (config.use_torbox && config.torbox_key && config.torbox_key.length > 5) {
+        console.log('📦 Torbox enabled');
+        services.torbox = new Torbox(config.torbox_key);
+        services.useTorbox = true;
+    }
+    
+    // Check MediaFlow Proxy (for RD sharing)
+    if (config.mediaflow_url && config.mediaflow_password) {
+        console.log('🔀 MediaFlow Proxy enabled for RD sharing');
+        services.mediaflowProxy = {
+            url: config.mediaflow_url,
+            password: config.mediaflow_password
+        };
+    }
+    
+    if (!services.useRealDebrid && !services.useTorbox) {
+        console.log('⚪ No debrid service enabled - using P2P mode');
+    }
+    
+    return services;
+}
+
+// ✅ MediaFlow Proxy Helper
+function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
+    if (!mediaflowConfig || !mediaflowConfig.url) {
+        return directUrl; // No proxy configured, return direct URL
+    }
+    
+    try {
+        // MediaFlow Proxy format: {mediaflow_url}/proxy/stream?d={base64_encoded_direct_url}&password={password}
+        const encodedUrl = btoa(directUrl);
+        const mediaflowUrl = mediaflowConfig.url.replace(/\/$/, ''); // Remove trailing slash
+        const password = mediaflowConfig.password || '';
+        
+        const proxiedUrl = `${mediaflowUrl}/proxy/stream?d=${encodedUrl}&password=${encodeURIComponent(password)}`;
+        
+        console.log(`🔀 Proxying URL through MediaFlow`);
+        return proxiedUrl;
+    } catch (error) {
+        console.error(`❌ MediaFlow proxy failed, using direct URL:`, error.message);
+        return directUrl;
     }
 }
 
@@ -1366,9 +1765,13 @@ async function handleStream(type, id, config, workerOrigin) {
     try {
         // Usa la configurazione passata, con fallback alle variabili d'ambiente
         const tmdbKey = config.tmdb_key;
-        const rdKey = config.rd_key;
-        const rdKeyAvailable = rdKey && rdKey.length > 5;
-        const realdebrid = new RealDebrid(rdKey);
+        
+        // ✅ Use debrid services factory (supports both RD and Torbox)
+        const debridServices = createDebridServices(config);
+        const useRealDebrid = debridServices.useRealDebrid;
+        const useTorbox = debridServices.useTorbox;
+        const rdService = debridServices.realdebrid;
+        const torboxService = debridServices.torbox;
 
         let imdbId = null;
         let kitsuId = null;
@@ -1524,40 +1927,71 @@ async function handleStream(type, id, config, workerOrigin) {
         const TOTAL_RESULTS_TARGET = 50; // Stop searching when we have enough results to avoid excessive subrequests.
         let totalQueries = 0;
 
+        // ✅ Initialize Jackettio if ENV vars are set
+        let jackettioInstance = null;
+        if (config.jackett_url && config.jackett_api_key) {
+            jackettioInstance = new Jackettio(
+                config.jackett_url, 
+                config.jackett_api_key,
+                config.jackett_password // Optional password
+            );
+            console.log('🔍 [Jackettio] Instance initialized (ITALIAN ONLY mode)');
+        }
+
         for (const query of finalSearchQueries) {
             console.log(`\n🔍 Searching all sources for: "${query}"`);
 
             // Stop searching if we have a good number of results to process.
-            if (allRawResults.length >= TOTAL_RESULTS_TARGET * 3) { // *3 because we have 3 sources
+            if (allRawResults.length >= TOTAL_RESULTS_TARGET * 4) { // *4 because we have 4 sources (including Jackettio)
                 console.log(`🎯 Target of ~${TOTAL_RESULTS_TARGET} unique results likely reached. Stopping further searches.`);
                 break;
             }
 
-            const [uindexResults, corsaroNeroResults, knabenResults] = await Promise.allSettled([
+            const searchPromises = [
                 fetchUIndexData(query, searchType, italianTitle),
                 fetchCorsaroNeroData(query, searchType),
                 fetchKnabenData(query, searchType)
-            ]);
+            ];
 
-            if (corsaroNeroResults.status === 'fulfilled' && corsaroNeroResults.value) {
-                console.log(`🏴‍☠️ CorsaroNero returned ${corsaroNeroResults.value.length} results for query.`);
-                allRawResults.push(...corsaroNeroResults.value);
-            } else if (corsaroNeroResults.status === 'rejected') {
-                console.error('❌ CorsaroNero search failed:', corsaroNeroResults.reason);
-            }
-            
-            if (uindexResults.status === 'fulfilled' && uindexResults.value) {
-                console.log(`📊 UIndex returned ${uindexResults.value.length} results for query.`);
-                allRawResults.push(...uindexResults.value);
-            } else if (uindexResults.status === 'rejected') {
-                console.error('❌ UIndex search failed:', uindexResults.reason);
+            // Add Jackettio if configured
+            if (jackettioInstance) {
+                searchPromises.push(fetchJackettioData(query, searchType, jackettioInstance));
             }
 
-            if (knabenResults.status === 'fulfilled' && knabenResults.value) {
-                console.log(`🦉 Knaben.org returned ${knabenResults.value.length} results for query.`);
-                allRawResults.push(...knabenResults.value);
-            } else if (knabenResults.status === 'rejected') {
-                console.error('❌ Knaben.org search failed:', knabenResults.reason);
+            const results = await Promise.allSettled(searchPromises);
+
+            // Process UIndex results
+            if (results[0].status === 'fulfilled' && results[0].value) {
+                console.log(`📊 UIndex returned ${results[0].value.length} results for query.`);
+                allRawResults.push(...results[0].value);
+            } else if (results[0].status === 'rejected') {
+                console.error('❌ UIndex search failed:', results[0].reason);
+            }
+
+            // Process CorsaroNero results
+            if (results[1].status === 'fulfilled' && results[1].value) {
+                console.log(`🏴‍☠️ CorsaroNero returned ${results[1].value.length} results for query.`);
+                allRawResults.push(...results[1].value);
+            } else if (results[1].status === 'rejected') {
+                console.error('❌ CorsaroNero search failed:', results[1].reason);
+            }
+
+            // Process Knaben results
+            if (results[2].status === 'fulfilled' && results[2].value) {
+                console.log(`🦉 Knaben.org returned ${results[2].value.length} results for query.`);
+                allRawResults.push(...results[2].value);
+            } else if (results[2].status === 'rejected') {
+                console.error('❌ Knaben.org search failed:', results[2].reason);
+            }
+
+            // Process Jackettio results (if configured)
+            if (jackettioInstance && results[3]) {
+                if (results[3].status === 'fulfilled' && results[3].value) {
+                    console.log(`🔍 Jackettio returned ${results[3].value.length} results for query.`);
+                    allRawResults.push(...results[3].value);
+                } else if (results[3].status === 'rejected') {
+                    console.error('❌ Jackettio search failed:', results[3].reason);
+                }
             }
 
             totalQueries++;
@@ -1586,10 +2020,14 @@ async function handleStream(type, id, config, workerOrigin) {
                 if (isNewItalian && !isExistingItalian) {
                     isNewBetter = true;
                 } else if (isNewItalian === isExistingItalian) {
-                    // If language is the same, prefer CorsaroNero
-                    if (result.source === 'CorsaroNero' && existing.source !== 'CorsaroNero') {
+                    // If language is the same, prefer Jackettio (private instance)
+                    if (result.source === 'Jackettio' && existing.source !== 'Jackettio') {
                         isNewBetter = true;
-                    } else if (result.source === existing.source || (result.source !== 'CorsaroNero' && existing.source !== 'CorsaroNero')) {
+                    } else if (existing.source === 'Jackettio' && result.source !== 'Jackettio') {
+                        isNewBetter = false; // Keep Jackettio
+                    } else if (result.source === 'CorsaroNero' && existing.source !== 'CorsaroNero' && existing.source !== 'Jackettio') {
+                        isNewBetter = true;
+                    } else if (result.source === existing.source || (result.source !== 'CorsaroNero' && existing.source !== 'CorsaroNero' && result.source !== 'Jackettio' && existing.source !== 'Jackettio')) {
                         // If source is also the same, or neither is the preferred one, prefer more seeders
                         if ((result.seeders || 0) > (existing.seeders || 0)) {
                             isNewBetter = true;
@@ -1671,165 +2109,277 @@ async function handleStream(type, id, config, workerOrigin) {
         const maxResults = 30; // Increased limit
         filteredResults = filteredResults.slice(0, maxResults);
         
-        console.log(`🔄 Checking Real-Debrid for ${filteredResults.length} results (global cache & personal torrents)...`);
-        const hashes = filteredResults.map(t => t.infoHash).filter(h => h && h.length >= 32);
+        console.log(`🔄 Checking debrid services for ${filteredResults.length} results...`);
+        const hashes = filteredResults.map(t => t.infoHash.toLowerCase()).filter(h => h && h.length >= 32);
         
         if (hashes.length === 0) {
             console.log('❌ No valid info hashes found');
             return { streams: [] };
         }
 
-        // Fetch global cache and user torrents in parallel
-        let cacheResults = {};
-        let userTorrents = [];
-        let userTorrentsMap = new Map();
+        // ✅ Check cache for enabled services in parallel
+        let rdCacheResults = {};
+        let rdUserTorrents = [];
+        let torboxCacheResults = {};
+        let torboxUserTorrents = [];
 
-        if (rdKeyAvailable) {
-            const [globalCacheCheck, userTorrentsCheck] = await Promise.all([
-                realdebrid.checkCache(hashes),
-                realdebrid.getTorrents().catch(e => {
-                    console.error("⚠️ Failed to fetch user torrents, personal cache will not be available.", e.message);
-                    return []; // Return empty array on failure
-                })
-            ]);
-            cacheResults = globalCacheCheck;
-            userTorrents = userTorrentsCheck;
-            userTorrentsMap = new Map(userTorrents.map(t => [t.hash.toLowerCase(), t]));
-        }
-
-        console.log(`✅ Global cache check complete. Found ${userTorrents.length} torrents in user's account.`);
+        const cacheChecks = [];
         
-        // ✅ Build streams with enhanced error handling
-        const streams = await Promise.all(
-            filteredResults.map(async (result, index) => {
-                try {
-                    const qualityDisplay = result.quality ? result.quality.toUpperCase() : 'Unknown';
-                    const qualitySymbol = getQualitySymbol(qualityDisplay);
-
-                    if (rdKeyAvailable) {
-                        // --- LOGICA CON REAL-DEBRID ---
-                        let streamUrl = '';
-                        let cacheType = 'none'; // 'none', 'global', 'personal'
-                        let streamError = null;
-
-                        // ✅ Prepara la configurazione per includerla negli URL di fallback
-                        const encodedConfig = btoa(JSON.stringify(config));
-                        
-                        const infoHashLower = result.infoHash.toLowerCase();
-                        const globalCacheData = cacheResults[infoHashLower];
-                        const userTorrentData = userTorrentsMap.get(infoHashLower);
-
-                        if (globalCacheData?.cached && globalCacheData.downloadLink) {
-                            cacheType = 'global';
-                            try {
-                                console.log(`⚡ Getting stream URL for GLOBAL cached torrent: ${result.title}`);
-                                const unrestricted = await realdebrid.unrestrictLink(globalCacheData.downloadLink);
-                                streamUrl = unrestricted.download;
-                                console.log(`✅ Got Real-Debrid stream URL`);
-                            } catch (error) {
-                                console.error(`❌ Failed to unrestrict GLOBAL cached link for ${result.title}. Falling back to RD-add. Error:`, error.message); 
-                                cacheType = 'none';
-                                streamUrl = `${workerOrigin}/rd-add/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
-                                streamError = error.message;
+        if (useRealDebrid) {
+            console.log('🔵 Checking Real-Debrid cache...');
+            cacheChecks.push(
+                Promise.all([
+                    rdService.checkCache(hashes),
+                    rdService.getTorrents().catch(e => {
+                        console.error("⚠️ Failed to fetch RD user torrents.", e.message);
+                        return [];
+                    })
+                ]).then(([cache, torrents]) => {
+                    rdCacheResults = cache;
+                    rdUserTorrents = torrents;
+                })
+            );
+        }
+        
+        if (useTorbox) {
+            console.log('📦 Checking Torbox cache...');
+            cacheChecks.push(
+                Promise.all([
+                    torboxService.checkCache(hashes),
+                    torboxService.getTorrents().catch(e => {
+                        console.error("⚠️ Failed to fetch Torbox user torrents.", e.message);
+                        return [];
+                    })
+                ]).then(([cache, torrents]) => {
+                    torboxCacheResults = cache;
+                    torboxUserTorrents = torrents;
+                })
+            );
+        }
+        
+        await Promise.all(cacheChecks);
+        
+        console.log(`✅ Cache check complete. RD: ${rdUserTorrents.length} torrents, Torbox: ${torboxUserTorrents.length} torrents`);
+        
+        // ✅ Build streams with enhanced error handling - supports multiple debrid services
+        const streams = [];
+        
+        for (const result of filteredResults) {
+            try {
+                const qualityDisplay = result.quality ? result.quality.toUpperCase() : 'Unknown';
+                const qualitySymbol = getQualitySymbol(qualityDisplay);
+                const italianIcon = isItalian(result.title, italianTitle) ? '🇮🇹 ' : '';
+                const encodedConfig = btoa(JSON.stringify(config));
+                const infoHashLower = result.infoHash.toLowerCase();
+                
+                // ✅ REAL-DEBRID STREAM (if enabled)
+                if (useRealDebrid) {
+                    const rdCacheData = rdCacheResults[infoHashLower];
+                    const rdUserTorrent = rdUserTorrents.find(t => t.hash?.toLowerCase() === infoHashLower);
+                    
+                    let streamUrl = '';
+                    let cacheType = 'none';
+                    let streamError = null;
+                    
+                    if (rdCacheData?.cached && rdCacheData.downloadLink) {
+                        cacheType = 'global';
+                        try {
+                            console.log(`🔵 ⚡ Getting RD stream URL for GLOBAL cached: ${result.title}`);
+                            const unrestricted = await rdService.unrestrictLink(rdCacheData.downloadLink);
+                            let directUrl = unrestricted.download;
+                            
+                            // ✅ Proxy through MediaFlow if configured
+                            if (debridServices.mediaflowProxy) {
+                                streamUrl = proxyThroughMediaFlow(directUrl, debridServices.mediaflowProxy);
+                            } else {
+                                streamUrl = directUrl;
                             }
-                        } else if (userTorrentData && userTorrentData.status === 'downloaded') {
-                            cacheType = 'personal';
-                            streamUrl = `${workerOrigin}/rd-stream-personal/${encodedConfig}/${userTorrentData.id}`;
-                            console.log(`👤 Found in PERSONAL cache: ${result.title}`);
-                        } else {
+                        } catch (error) {
+                            console.error(`❌ RD unrestrict failed. Fallback to add. Error:`, error.message);
                             cacheType = 'none';
                             streamUrl = `${workerOrigin}/rd-add/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
+                            streamError = error.message;
                         }
-                        
-                        const isCached = cacheType === 'global' || cacheType === 'personal';
-                        const cachedIcon = isCached ? '⚡ ' : '📥🧲 ';
-                        const errorIcon = streamError ? '⚠️ ' : '';                    const italianIcon = isItalian(result.title, italianTitle) ? '🇮🇹 ' : '';
-
-                        const streamName = [
-                            cachedIcon + errorIcon,
-                            `[${result.source}]`,
-                            italianIcon,
-                            qualitySymbol,
-                            qualityDisplay,
-                            `👥 ${result.seeders || 0}/${result.leechers || 0}`,
-                            result.size && result.size !== 'Unknown' ? `💾 ${result.size}` : null
-                        ].filter(Boolean).join(' | ');
-                        
-                        const debugInfo = streamError ? `\n⚠️ Stream error: ${streamError}` : '';
-                        let cacheInfoText;
-                        if (cacheType === 'global') {
-                            cacheInfoText = '🔗 Streaming da cache Globale RD';
-                        } else if (cacheType === 'personal') {
-                            cacheInfoText = '🔗 Streaming da cache Personale RD';
-                        } else {
-                            cacheInfoText = '📥🧲 Aggiungi a Real-Debrid';
-                        }
-                        
-                        const streamTitle = [
-                            `🎬 ${result.title}`,
-                            `📡 ${result.source} | 💾 ${result.size} | 👥 ${result.seeders || 0} seeds`,
-                            cacheInfoText,
-                            result.categories?.[0] ? `📂 ${result.categories[0]}` : '',
-                            debugInfo
-                        ].filter(Boolean).join('\n');
-                        
-                        return {
-                            name: streamName,
-                            title: streamTitle,
-                            url: streamUrl,
-                            behaviorHints: {
-                                bingeGroup: 'uindex-realdebrid-optimized',
-                                notWebReady: false
-                            },
-                            _meta: { infoHash: result.infoHash, cached: isCached, cacheSource: cacheType, originalSize: result.size, quality: result.quality, seeders: result.seeders, error: streamError }
-                        };
+                    } else if (rdUserTorrent && rdUserTorrent.status === 'downloaded') {
+                        cacheType = 'personal';
+                        streamUrl = `${workerOrigin}/rd-stream-personal/${encodedConfig}/${rdUserTorrent.id}`;
+                        console.log(`🔵 👤 Found in RD PERSONAL cache: ${result.title}`);
                     } else {
-                        // --- LOGICA SENZA REAL-DEBRID (P2P) ---
-                        const italianIcon = isItalian(result.title, italianTitle) ? '🇮🇹 ' : '';
-                        const streamName = [
-                            '[P2P]',
-                            `[${result.source}]`,
-                            italianIcon,
-                            qualitySymbol,
-                            qualityDisplay,
-                            `👥 ${result.seeders || 0}/${result.leechers || 0}`,
-                            result.size && result.size !== 'Unknown' ? `💾 ${result.size}` : null
-                        ].filter(Boolean).join(' | ');
-
-                        const streamTitle = [
-                            `🎬 ${result.title}`,
-                            `📡 ${result.source} | 💾 ${result.size} | 👥 ${result.seeders || 0} seeds`,
-                            '🔗 Link Magnet diretto (P2P)',
-                            result.categories?.[0] ? `📂 ${result.categories[0]}` : ''
-                        ].filter(Boolean).join('\n');
-
-                        return {
-                            name: streamName,
-                            title: streamTitle,
-                            infoHash: result.infoHash,
-                            behaviorHints: {
-                                bingeGroup: 'uindex-p2p',
-                                notWebReady: true // Fondamentale per dire a Stremio di usare il motore torrent
-                            },
-                            _meta: { infoHash: result.infoHash, cached: false, quality: result.quality, seeders: result.seeders }
-                        };
+                        cacheType = 'none';
+                        streamUrl = `${workerOrigin}/rd-add/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
                     }
-                } catch (error) {
-                    console.error(`❌ Error processing result ${index}:`, error);
                     
-                    // Return a basic stream even if processing failed
-                    return {
-                        name: `❌ ${result.title} (Error)`,
-                        title: `Error processing: ${error.message}`,
-                        url: result.magnetLink,
+                    const isCached = cacheType === 'global' || cacheType === 'personal';
+                    const cachedIcon = isCached ? '⚡ ' : '📥🧲 ';
+                    const errorIcon = streamError ? '⚠️ ' : '';
+                    
+                    const streamName = [
+                        cachedIcon + errorIcon + '🔵 ',
+                        `[${result.source}]`,
+                        italianIcon,
+                        qualitySymbol,
+                        qualityDisplay,
+                        `👥 ${result.seeders || 0}/${result.leechers || 0}`,
+                        result.size && result.size !== 'Unknown' ? `💾 ${result.size}` : null
+                    ].filter(Boolean).join(' | ');
+                    
+                    const debugInfo = streamError ? `\n⚠️ Stream error: ${streamError}` : '';
+                    let cacheInfoText;
+                    if (cacheType === 'global') {
+                        cacheInfoText = '🔗 Streaming da cache Globale Real-Debrid';
+                    } else if (cacheType === 'personal') {
+                        cacheInfoText = '🔗 Streaming da cache Personale Real-Debrid';
+                    } else {
+                        cacheInfoText = '📥🧲 Aggiungi a Real-Debrid';
+                    }
+                    
+                    const streamTitle = [
+                        `🎬 ${result.title}`,
+                        `📡 ${result.source} | 💾 ${result.size} | 👥 ${result.seeders || 0} seeds`,
+                        cacheInfoText,
+                        result.categories?.[0] ? `📂 ${result.categories[0]}` : '',
+                        debugInfo
+                    ].filter(Boolean).join('\n');
+                    
+                    streams.push({
+                        name: streamName,
+                        title: streamTitle,
+                        url: streamUrl,
                         behaviorHints: {
                             bingeGroup: 'uindex-realdebrid-optimized',
-                            notWebReady: true
+                            notWebReady: false
+                        },
+                        _meta: { 
+                            infoHash: result.infoHash, 
+                            cached: isCached, 
+                            cacheSource: cacheType, 
+                            service: 'realdebrid',
+                            originalSize: result.size, 
+                            quality: result.quality, 
+                            seeders: result.seeders, 
+                            error: streamError 
                         }
-                    };
+                    });
                 }
-            })
-        );
+                
+                // ✅ TORBOX STREAM (if enabled)
+                if (useTorbox) {
+                    const torboxCacheData = torboxCacheResults[infoHashLower];
+                    const torboxUserTorrent = torboxUserTorrents.find(t => t.hash?.toLowerCase() === infoHashLower);
+                    
+                    let streamUrl = '';
+                    let cacheType = 'none';
+                    let streamError = null;
+                    
+                    if (torboxCacheData?.cached && torboxCacheData.downloadLink) {
+                        cacheType = 'global';
+                        streamUrl = `${workerOrigin}/torbox-stream/${encodedConfig}/${encodeURIComponent(result.infoHash)}`;
+                        console.log(`📦 ⚡ Torbox GLOBAL cache available: ${result.title}`);
+                    } else if (torboxUserTorrent && torboxUserTorrent.download_finished === true) {
+                        cacheType = 'personal';
+                        streamUrl = `${workerOrigin}/torbox-stream-personal/${encodedConfig}/${torboxUserTorrent.id}`;
+                        console.log(`📦 👤 Found in Torbox PERSONAL cache: ${result.title}`);
+                    } else {
+                        cacheType = 'none';
+                        streamUrl = `${workerOrigin}/torbox-add/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
+                    }
+                    
+                    const isCached = cacheType === 'global' || cacheType === 'personal';
+                    const cachedIcon = isCached ? '⚡ ' : '📥🧲 ';
+                    const errorIcon = streamError ? '⚠️ ' : '';
+                    
+                    const streamName = [
+                        cachedIcon + errorIcon + '📦 ',
+                        `[${result.source}]`,
+                        italianIcon,
+                        qualitySymbol,
+                        qualityDisplay,
+                        `👥 ${result.seeders || 0}/${result.leechers || 0}`,
+                        result.size && result.size !== 'Unknown' ? `💾 ${result.size}` : null
+                    ].filter(Boolean).join(' | ');
+                    
+                    let cacheInfoText;
+                    if (cacheType === 'global') {
+                        cacheInfoText = '🔗 Streaming da cache Globale Torbox';
+                    } else if (cacheType === 'personal') {
+                        cacheInfoText = '🔗 Streaming da cache Personale Torbox';
+                    } else {
+                        cacheInfoText = '📥🧲 Aggiungi a Torbox';
+                    }
+                    
+                    const streamTitle = [
+                        `🎬 ${result.title}`,
+                        `📡 ${result.source} | 💾 ${result.size} | 👥 ${result.seeders || 0} seeds`,
+                        cacheInfoText,
+                        result.categories?.[0] ? `📂 ${result.categories[0]}` : '',
+                    ].filter(Boolean).join('\n');
+                    
+                    streams.push({
+                        name: streamName,
+                        title: streamTitle,
+                        url: streamUrl,
+                        behaviorHints: {
+                            bingeGroup: 'uindex-torbox-optimized',
+                            notWebReady: false
+                        },
+                        _meta: { 
+                            infoHash: result.infoHash, 
+                            cached: isCached, 
+                            cacheSource: cacheType, 
+                            service: 'torbox',
+                            originalSize: result.size, 
+                            quality: result.quality, 
+                            seeders: result.seeders 
+                        }
+                    });
+                }
+                
+                // ✅ P2P STREAM (if no debrid service enabled)
+                if (!useRealDebrid && !useTorbox) {
+                    const streamName = [
+                        '[P2P]',
+                        `[${result.source}]`,
+                        italianIcon,
+                        qualitySymbol,
+                        qualityDisplay,
+                        `👥 ${result.seeders || 0}/${result.leechers || 0}`,
+                        result.size && result.size !== 'Unknown' ? `💾 ${result.size}` : null
+                    ].filter(Boolean).join(' | ');
+
+                    const streamTitle = [
+                        `🎬 ${result.title}`,
+                        `📡 ${result.source} | 💾 ${result.size} | 👥 ${result.seeders || 0} seeds`,
+                        '🔗 Link Magnet diretto (P2P)',
+                        result.categories?.[0] ? `📂 ${result.categories[0]}` : ''
+                    ].filter(Boolean).join('\n');
+
+                    streams.push({
+                        name: streamName,
+                        title: streamTitle,
+                        infoHash: result.infoHash,
+                        behaviorHints: {
+                            bingeGroup: 'uindex-p2p',
+                            notWebReady: true
+                        },
+                        _meta: { infoHash: result.infoHash, cached: false, quality: result.quality, seeders: result.seeders }
+                    });
+                }
+                
+            } catch (error) {
+                console.error(`❌ Error processing result:`, error);
+                
+                // Return a basic stream even if processing failed
+                streams.push({
+                    name: `❌ ${result.title} (Error)`,
+                    title: `Error processing: ${error.message}`,
+                    url: result.magnetLink,
+                    behaviorHints: {
+                        bingeGroup: 'uindex-error',
+                        notWebReady: true
+                    }
+                });
+            }
+        }
         
         // ✅ Enhanced sorting: source, italian, cached first, then by quality, then by seeders
         streams.sort((a, b) => {
@@ -2075,7 +2625,7 @@ export default async function handler(req, res) {
                 id: 'community.stremizio.plus.ita',
                 version: '2.0.0',
                 name: 'Stremizio 2.0',
-                description: 'Streaming da UIndex, CorsaroNero e Knaben con o senza Real-Debrid.',
+                description: 'Streaming da UIndex, CorsaroNero, Knaben e Jackettio con o senza Real-Debrid.',
                 logo: `${url.origin}/logo.png`,
                 resources: ['stream'],
                 types: ['movie', 'series', 'anime'],
@@ -2106,6 +2656,21 @@ export default async function handler(req, res) {
                 } catch (e) {
                     console.error("Errore nel parsing della configurazione (segmento 1) dall'URL:", e);
                 }
+            }
+
+            // ✅ Add Jackettio ENV vars if available (fallback for private use)
+            if (env.JACKETT_URL && env.JACKETT_API_KEY) {
+                config.jackett_url = env.JACKETT_URL;
+                config.jackett_api_key = env.JACKETT_API_KEY;
+                config.jackett_password = env.JACKETT_PASSWORD; // Optional
+                console.log('🔍 [Jackettio] Using ENV configuration');
+            }
+
+            // ✅ Add MediaFlow Proxy ENV vars if available (for RD sharing)
+            if (env.MEDIAFLOW_URL && env.MEDIAFLOW_PASSWORD) {
+                config.mediaflow_url = env.MEDIAFLOW_URL;
+                config.mediaflow_password = env.MEDIAFLOW_PASSWORD;
+                console.log('🔀 [MediaFlow] Using ENV configuration for RD sharing');
             }
 
             // Estrae tipo e id dalle posizioni corrette
@@ -2437,9 +3002,20 @@ export default async function handler(req, res) {
                 }
 
                 const unrestricted = await realdebrid.unrestrictLink(downloadLink);
-                console.log(`🚀 Redirecting to personal stream: ${unrestricted.download}`);
+                let finalStreamUrl = unrestricted.download;
+                
+                // ✅ Proxy through MediaFlow if configured
+                if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
+                    const mediaflowConfig = {
+                        url: userConfig.mediaflow_url,
+                        password: userConfig.mediaflow_password
+                    };
+                    finalStreamUrl = proxyThroughMediaFlow(finalStreamUrl, mediaflowConfig);
+                }
+                
+                console.log(`🚀 Redirecting to personal stream`);
 
-                res.setHeader('Location', unrestricted.download);
+                res.setHeader('Location', finalStreamUrl);
                 return res.status(302).end();
 
             } catch (error) {
@@ -2525,6 +3101,193 @@ export default async function handler(req, res) {
             }
         }
 
+        // ✅ TORBOX ROUTES - Add torrent to Torbox
+        if (url.pathname.startsWith('/torbox-add/')) {
+            const pathParts = url.pathname.split('/');
+            const encodedConfigStr = pathParts[2];
+            const encodedMagnet = pathParts[3];
+            
+            const htmlResponse = (title, message, isError = false) => `
+                <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title>
+                <style>body{font-family:sans-serif;background-color:#1E1E1E;color:#E0E0E0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;padding:1em;} .container{max-width:90%;padding:2em;background-color:#2A2A2A;border-radius:8px;box-shadow:0 4px 8px rgba(0,0,0,0.3);} h1{color:${isError ? '#FF6B6B' : '#4EC9B0'};}</style>
+                </head><body><div class="container"><h1>${title}</h1><p>${message}</p></div></body></html>`;
+            
+            let userConfig = {};
+            res.setHeader('Content-Type', 'text/html');
+            try {
+                if (!encodedConfigStr) throw new Error("Configurazione mancante nell'URL.");
+                userConfig = JSON.parse(atob(encodedConfigStr));
+            } catch (e) {
+                return res.status(400).send(htmlResponse('Errore di Configurazione', `Impossibile leggere la configurazione dall'URL: ${e.message}`, true));
+            }
+
+            if (!userConfig.torbox_key) {
+                return res.status(400).send(htmlResponse('Errore di Configurazione', 'La chiave API di Torbox non è stata configurata.', true));
+            }
+
+            if (!encodedMagnet) {
+                return res.status(400).send(htmlResponse('Errore', 'Link magnet non valido.', true));
+            }
+
+            try {
+                const magnetLink = decodeURIComponent(encodedMagnet);
+                const infoHash = extractInfoHash(magnetLink);
+                if (!infoHash) throw new Error('Magnet link non valido o senza info hash.');
+
+                const torbox = new Torbox(userConfig.torbox_key);
+
+                const userTorrents = await torbox.getTorrents();
+                let torrent = userTorrents.find(t => t.hash?.toLowerCase() === infoHash.toLowerCase());
+
+                let torrentId;
+                if (!torrent) {
+                    console.log(`📦 Adding new torrent to Torbox: ${infoHash}`);
+                    const addResponse = await torbox.addTorrent(magnetLink);
+                    torrentId = addResponse.torrent_id || addResponse.id;
+                    if (!torrentId) throw new Error('Impossibile ottenere l\'ID del torrent da Torbox.');
+                } else {
+                    torrentId = torrent.id;
+                    console.log(`📦 Using existing Torbox torrent. ID: ${torrentId}`);
+                }
+
+                for (let i = 0; i < 20; i++) {
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    const torrentInfo = await torbox.getTorrentInfo(torrentId);
+                    console.log(`📦 [${i + 1}/20] Torbox ${torrentId}: ${torrentInfo.download_finished ? 'completed' : 'downloading'}`);
+
+                    if (torrentInfo.download_finished === true) {
+                        const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
+                        const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
+                        
+                        const videoFiles = (torrentInfo.files || []).filter(file => {
+                            const lowerName = file.name?.toLowerCase() || '';
+                            return videoExtensions.some(ext => lowerName.endsWith(ext)) &&
+                                   !junkKeywords.some(junk => lowerName.includes(junk));
+                        });
+                        
+                        const bestFile = videoFiles.length > 0
+                            ? videoFiles.reduce((max, file) => (file.size > max.size ? file : max), videoFiles[0])
+                            : (torrentInfo.files || [])[0];
+
+                        if (!bestFile) throw new Error('Nessun file valido trovato nel torrent.');
+                        
+                        const downloadData = await torbox.createDownload(torrentId, bestFile.id);
+                        console.log(`📦 🚀 Redirecting to Torbox stream`);
+                        return res.redirect(302, downloadData);
+                    }
+                }
+
+                return res.status(200).send(htmlResponse(
+                    'Download in Corso',
+                    'Il torrent è stato aggiunto a Torbox ed è in download. Torna tra qualche minuto.',
+                    false
+                ));
+
+            } catch (error) {
+                console.error('📦 ❌ Torbox add error:', error);
+                return res.status(500).send(htmlResponse('Errore Torbox', error.message, true));
+            }
+        }
+
+        if (url.pathname.startsWith('/torbox-stream/')) {
+            const pathParts = url.pathname.split('/');
+            const encodedConfigStr = pathParts[2];
+            const encodedHash = pathParts[3];
+            
+            let userConfig = {};
+            res.setHeader('Content-Type', 'text/html');
+            try {
+                userConfig = JSON.parse(atob(encodedConfigStr));
+            } catch (e) {
+                return res.status(400).send(`<h1>Errore Config</h1><p>${e.message}</p>`);
+            }
+
+            if (!userConfig.torbox_key) {
+                return res.status(400).send('<h1>Errore</h1><p>Torbox API key non configurata.</p>');
+            }
+
+            try {
+                const infoHash = decodeURIComponent(encodedHash);
+                const torbox = new Torbox(userConfig.torbox_key);
+
+                const userTorrents = await torbox.getTorrents();
+                let torrent = userTorrents.find(t => t.hash?.toLowerCase() === infoHash.toLowerCase());
+
+                if (torrent && torrent.download_finished === true) {
+                    const torrentInfo = await torbox.getTorrentInfo(torrent.id);
+                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
+                    const videoFiles = (torrentInfo.files || []).filter(f => 
+                        videoExtensions.some(ext => f.name?.toLowerCase().endsWith(ext))
+                    );
+                    const bestFile = videoFiles.length > 0
+                        ? videoFiles.reduce((max, f) => (f.size > max.size ? f : max), videoFiles[0])
+                        : (torrentInfo.files || [])[0];
+                    
+                    if (!bestFile) throw new Error('No valid file found');
+                    
+                    const downloadData = await torbox.createDownload(torrent.id, bestFile.id);
+                    return res.redirect(302, downloadData);
+                }
+
+                const fakeMagnet = `magnet:?xt=urn:btih:${infoHash}`;
+                return res.redirect(302, `/torbox-add/${encodedConfigStr}/${encodeURIComponent(fakeMagnet)}`);
+
+            } catch (error) {
+                console.error('📦 ❌ Torbox stream error:', error);
+                return res.status(500).send(`<h1>Errore</h1><p>${error.message}</p>`);
+            }
+        }
+
+        if (url.pathname.startsWith('/torbox-stream-personal/')) {
+            const pathParts = url.pathname.split('/');
+            const encodedConfigStr = pathParts[2];
+            const torrentId = pathParts[3];
+            
+            let userConfig = {};
+            res.setHeader('Content-Type', 'text/html');
+            try {
+                userConfig = JSON.parse(atob(encodedConfigStr));
+            } catch (e) {
+                return res.status(400).send(`<h1>Errore Config</h1><p>${e.message}</p>`);
+            }
+
+            if (!userConfig.torbox_key) {
+                return res.status(400).send('<h1>Errore</h1><p>Torbox API key non configurata.</p>');
+            }
+
+            try {
+                const torbox = new Torbox(userConfig.torbox_key);
+                const torrentInfo = await torbox.getTorrentInfo(torrentId);
+
+                if (!torrentInfo.download_finished) {
+                    throw new Error('Il torrent non è ancora completato.');
+                }
+
+                const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
+                const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
+                
+                const videoFiles = (torrentInfo.files || []).filter(file => {
+                    const lowerName = file.name?.toLowerCase() || '';
+                    return videoExtensions.some(ext => lowerName.endsWith(ext)) &&
+                           !junkKeywords.some(junk => lowerName.includes(junk));
+                });
+                
+                const bestFile = videoFiles.length > 0
+                    ? videoFiles.reduce((max, file) => (file.size > max.size ? file : max), videoFiles[0])
+                    : (torrentInfo.files || [])[0];
+
+                if (!bestFile) throw new Error('Nessun file valido trovato.');
+                
+                const downloadData = await torbox.createDownload(torrentId, bestFile.id);
+                console.log(`📦 🚀 Redirecting to personal Torbox stream`);
+                return res.redirect(302, downloadData);
+
+            } catch (error) {
+                console.error('📦 ❌ Torbox personal stream error:', error);
+                return res.status(500).send(`<h1>Errore</h1><p>${error.message}</p>`);
+            }
+        }
+
         // Health check
         if (url.pathname === '/health') {
             const health = {
@@ -2555,7 +3318,10 @@ export default async function handler(req, res) {
 
             const searchConfig = {
                 tmdb_key: env.TMDB_KEY,
-                rd_key: env.RD_KEY
+                rd_key: env.RD_KEY,
+                jackett_url: env.JACKETT_URL,
+                jackett_api_key: env.JACKETT_API_KEY,
+                jackett_password: env.JACKETT_PASSWORD
             };
 
             const result = await handleSearch({ query, type }, searchConfig);
