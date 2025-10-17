@@ -525,6 +525,10 @@ class Jackettio {
     async search(query, category = null, italianOnly = false) {
         if (!query) return [];
         
+        console.log(`🔍 [Jackettio] Starting search...`);
+        console.log(`🔍 [Jackettio] Query: "${query}" | Category: ${category || 'all'} | Italian only: ${italianOnly}`);
+        console.log(`🔍 [Jackettio] Base URL: ${this.baseUrl}`);
+        
         try {
             const params = new URLSearchParams({
                 apikey: this.apiKey,
@@ -533,8 +537,7 @@ class Jackettio {
             });
             
             const url = `${this.baseUrl}/api/v2.0/indexers/all/results?${params}`;
-            
-            console.log(`🔍 [Jackettio] Searching for: "${query}" (category: ${category || 'all'}) ${italianOnly ? '[ITALIAN ONLY]' : ''}`);
+            console.log(`🔍 [Jackettio] Full URL: ${url.replace(this.apiKey, 'API_KEY_HIDDEN')}`);
             
             const headers = {
                 'User-Agent': 'Stremizio/2.0'
@@ -543,11 +546,14 @@ class Jackettio {
             // Add password if provided (for authenticated instances)
             if (this.password) {
                 headers['Authorization'] = `Basic ${btoa(`api:${this.password}`)}`;
+                console.log(`🔍 [Jackettio] Using Basic Authentication`);
             }
             
             const response = await fetch(url, { headers });
 
             if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`🔍 ❌ [Jackettio] API error (${response.status}):`, errorText.substring(0, 200));
                 throw new Error(`Jackettio API error: ${response.status}`);
             }
 
@@ -558,28 +564,32 @@ class Jackettio {
                 return [];
             }
 
-            console.log(`🔍 [Jackettio] Found ${data.Results.length} raw results.`);
+            console.log(`🔍 [Jackettio] Found ${data.Results.length} raw results from API.`);
             
             // Parse Jackett results to our standard format
+            let skippedNonMagnet = 0;
+            let skippedNoHash = 0;
+            let skippedNonItalian = 0;
+            
             const streams = data.Results.map(result => {
                 // Jackett può restituire sia magnet che torrent file
                 let magnetLink = result.MagnetUri || result.Link;
                 
                 // Se è un .torrent file, prova a estrarre l'hash
                 if (!magnetLink || !magnetLink.startsWith('magnet:')) {
-                    console.log(`⚠️ [Jackettio] Skipping non-magnet result: ${result.Title}`);
+                    skippedNonMagnet++;
                     return null;
                 }
 
                 const infoHash = extractInfoHash(magnetLink);
                 if (!infoHash) {
-                    console.log(`⚠️ [Jackettio] Failed to extract hash from: ${result.Title}`);
+                    skippedNoHash++;
                     return null;
                 }
 
                 // ✅ FILTER: Italian only check
                 if (italianOnly && !isItalian(result.Title)) {
-                    console.log(`🚫 [Jackettio] Skipping non-Italian: ${result.Title}`);
+                    skippedNonItalian++;
                     return null;
                 }
 
@@ -619,11 +629,19 @@ class Jackettio {
                 };
             }).filter(Boolean);
 
-            console.log(`🔍 [Jackettio] Successfully parsed ${streams.length} ${italianOnly ? 'ITALIAN ' : ''}streams.`);
+            console.log(`🔍 [Jackettio] Filtering summary:`);
+            console.log(`🔍 [Jackettio]   - Valid Italian results: ${streams.length}`);
+            console.log(`🔍 [Jackettio]   - Skipped (non-magnet): ${skippedNonMagnet}`);
+            console.log(`🔍 [Jackettio]   - Skipped (no hash): ${skippedNoHash}`);
+            if (italianOnly) {
+                console.log(`🔍 [Jackettio]   - Skipped (non-Italian): ${skippedNonItalian}`);
+            }
+            
             return streams;
 
         } catch (error) {
-            console.error(`❌ [Jackettio] Search failed:`, error.message);
+            console.error(`🔍 ❌ [Jackettio] Search failed:`, error.message);
+            console.error(`🔍 ❌ [Jackettio] Error details:`, error);
             return [];
         }
     }
@@ -631,9 +649,11 @@ class Jackettio {
 
 async function fetchJackettioData(searchQuery, type = 'movie', jackettioInstance = null) {
     if (!jackettioInstance) {
-        console.log('⚠️ [Jackettio] Instance not configured, skipping.');
+        console.log('🔍 [Jackettio] Instance not configured, skipping.');
         return [];
     }
+
+    console.log(`🔍 [Jackettio] fetchJackettioData: "${searchQuery}" type=${type}`);
 
     try {
         // Map type to Jackett category codes
@@ -646,8 +666,12 @@ async function fetchJackettioData(searchQuery, type = 'movie', jackettioInstance
             category = '5070'; // TV/Anime
         }
 
+        console.log(`🔍 [Jackettio] Using category: ${category || 'all categories'}`);
+        
         // ✅ ONLY ITALIAN RESULTS
         const results = await jackettioInstance.search(searchQuery, category, true);
+        
+        console.log(`🔍 ✓ [Jackettio] Returning ${results.length} results to caller`);
         return results;
 
     } catch (error) {
@@ -1196,6 +1220,7 @@ class Torbox {
     async checkCache(hashes) {
         if (!hashes || hashes.length === 0) return {};
         
+        console.log(`📦 [Torbox] Checking cache for ${hashes.length} hashes...`);
         const results = {};
         
         // Torbox supports bulk check via POST
@@ -1214,12 +1239,18 @@ class Torbox {
             });
 
             if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`📦 ❌ Torbox checkCache failed (${response.status}):`, errorText);
                 throw new Error(`Torbox API error: ${response.status}`);
             }
 
             const data = await response.json();
+            console.log(`📦 ✓ Torbox cache check response:`, JSON.stringify(data).substring(0, 200) + '...');
             
             if (data.success && data.data) {
+                const cachedCount = Object.values(data.data).filter(info => info && info.cached).length;
+                console.log(`📦 ✓ Found ${cachedCount} cached torrents in Torbox`);
+                
                 hashes.forEach(hash => {
                     const cacheInfo = data.data[hash.toLowerCase()];
                     const isCached = cacheInfo && cacheInfo.cached === true;
@@ -1227,6 +1258,7 @@ class Torbox {
                     let isActuallyCachedAndStreamable = false;
                     
                     if (isCached && cacheInfo.files && cacheInfo.files.length > 0) {
+                        console.log(`📦 [${hash.substring(0, 8)}...] Cached with ${cacheInfo.files.length} files`);
                         const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
                         const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
                         
@@ -1250,8 +1282,9 @@ class Torbox {
                             // Store the hash and best file info for later retrieval
                             downloadLink = hash; // We'll use this to request the actual download later
                             isActuallyCachedAndStreamable = true;
+                            console.log(`📦 ✓ [${hash.substring(0, 8)}...] Best file: ${bestFile.name} (${(bestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
                         } else {
-                            console.warn(`⚠️ Torrent ${hash} is in Torbox cache but no suitable video file found.`);
+                            console.warn(`📦 ⚠️ [${hash.substring(0, 8)}...] Torrent is in cache but no suitable video file found.`);
                         }
                     }
                     
@@ -1264,16 +1297,18 @@ class Torbox {
                 });
             }
         } catch (error) {
-            console.error('Torbox cache check failed:', error);
+            console.error('📦 ❌ Torbox cache check failed:', error);
             hashes.forEach(hash => {
                 results[hash.toLowerCase()] = { cached: false, downloadLink: null, service: 'Torbox' };
             });
         }
         
+        console.log(`📦 [Torbox] Cache check complete: ${Object.values(results).filter(r => r.cached).length}/${hashes.length} cached`);
         return results;
     }
 
     async addTorrent(magnetLink) {
+        console.log(`📦 [Torbox] Adding torrent to account...`);
         const response = await fetch(`${this.baseUrl}/torrents/createtorrent`, {
             method: 'POST',
             headers: {
@@ -1287,37 +1322,49 @@ class Torbox {
         });
 
         if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`📦 ❌ Torbox addTorrent failed (${response.status}):`, errorText);
             throw new Error(`Torbox API error: ${response.status}`);
         }
 
         const data = await response.json();
         if (!data.success) {
+            console.error(`📦 ❌ Torbox error:`, data.error || 'Unknown error');
             throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
         }
         
+        console.log(`📦 ✓ Torrent added to Torbox:`, data.data.name || data.data.id);
         return data.data;
     }
 
     async getTorrents() {
-        const response = await fetch(`${this.baseUrl}/torrents/mylist`, {
+        // Torbox API v1: GET /torrents/mylist
+        const response = await fetch(`${this.baseUrl}/torrents/mylist?bypass_cache=true`, {
+            method: 'GET',
             headers: { 
-                'Authorization': `Bearer ${this.apiKey}` 
+                'Authorization': `Bearer ${this.apiKey}`,
+                'Content-Type': 'application/json'
             }
         });
         
         if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`Torbox getTorrents failed (${response.status}):`, errorText);
             throw new Error(`Failed to get torrents list from Torbox: ${response.status}`);
         }
         
         const data = await response.json();
         if (!data.success) {
+            console.error(`📦 ❌ Torbox error:`, data.error || 'Unknown error');
             throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
         }
         
+        console.log(`📦 ✓ Found ${(data.data || []).length} torrents in Torbox account`);
         return data.data || [];
     }
 
     async deleteTorrent(torrentId) {
+        console.log(`📦 [Torbox] Deleting torrent ${torrentId}...`);
         const response = await fetch(`${this.baseUrl}/torrents/controltorrent`, {
             method: 'POST',
             headers: {
@@ -1337,17 +1384,22 @@ class Torbox {
     }
 
     async getTorrentInfo(torrentId) {
+        console.log(`📦 [Torbox] Getting torrent info for ID ${torrentId}...`);
         const torrents = await this.getTorrents();
         const torrent = torrents.find(t => t.id === parseInt(torrentId));
         
         if (!torrent) {
+            console.error(`📦 ❌ Torrent ${torrentId} not found in Torbox`);
             throw new Error(`Torrent ${torrentId} not found in Torbox`);
         }
         
+        console.log(`📦 ✓ Found torrent: ${torrent.name} (${torrent.download_state})`);
         return torrent;
     }
 
     async createDownload(torrentId, fileId = null) {
+        console.log(`📦 [Torbox] Creating download link for torrent ${torrentId}${fileId ? ` file ${fileId}` : ''}...`);
+        // Torbox API v1: POST /torrents/requestdl
         const body = {
             torrent_id: parseInt(torrentId),
             file_id: fileId ? parseInt(fileId) : undefined,
@@ -1364,14 +1416,18 @@ class Torbox {
         });
 
         if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`📦 ❌ Torbox createDownload failed (${response.status}):`, errorText);
             throw new Error(`Torbox API error: ${response.status}`);
         }
 
         const data = await response.json();
         if (!data.success) {
+            console.error(`📦 ❌ Torbox error:`, data.error || 'Unknown error');
             throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
         }
         
+        console.log(`📦 ✓ Download link created successfully`);
         return data.data; // Returns direct download URL
     }
 }
