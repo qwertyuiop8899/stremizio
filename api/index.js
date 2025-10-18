@@ -3,7 +3,6 @@
 import * as cheerio from 'cheerio';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { DOMParser } from 'xmldom';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
@@ -514,192 +513,186 @@ async function fetchKnabenData(searchQuery, type = 'movie') {
 
 // --- FINE NUOVA SEZIONE ---
 
-// --- NUOVA SEZIONE: JACKETTIO/JACKETT INTEGRATION ---
+// --- NUOVA SEZIONE: JACKETTIO INTEGRATION ---
 
 class Jackettio {
     constructor(baseUrl, apiKey, password = null) {
-        // Clean up base URL - remove trailing slashes and API path if present
-        this.baseUrl = baseUrl
-            .replace(/\/+$/, '') // Remove trailing slashes
-            .replace(/\/api\/v2\.0.*$/, ''); // Remove API path if accidentally included
-        
+        // Use Torznab endpoint like the reference code
+        this.baseUrl = baseUrl.replace(/\/$/, ''); // Remove trailing slash
         this.apiKey = apiKey;
         this.password = password; // Optional password for authenticated instances
-        
-        console.log(`🔍 [Jackett] Initialized with base URL: ${this.baseUrl}`);
     }
 
     async search(query, category = null, italianOnly = false) {
         if (!query) return [];
         
-        console.log(`🔍 [Jackett] Starting Torznab search...`);
-        console.log(`🔍 [Jackett] Query: "${query}" | Category: ${category || 'all'} | Italian only: ${italianOnly}`);
-        console.log(`🔍 [Jackett] Base URL: ${this.baseUrl}`);
-        
         try {
-            // Use Torznab endpoint which includes info hash in results
+            // Use Torznab API endpoint as per reference code
+            // Format: /api/v2.0/indexers/all/results/torznab/api
+            const torznabUrl = `${this.baseUrl}/api/v2.0/indexers/all/results/torznab/api`;
+            
             const params = new URLSearchParams({
                 apikey: this.apiKey,
-                t: 'search',
+                t: 'search', // Torznab search type
                 q: query,
-                ...(category && { cat: category }) // 2000=Movies, 5000=TV, 5070=Anime
+                limit: '100', // Request more results
+                extended: '1' // Get extended attributes
             });
             
-            const url = `${this.baseUrl}/api/v2.0/indexers/all/results/torznab?${params}`;
-            console.log(`🔍 [Jackett] Torznab URL: ${url.replace(this.apiKey, 'API_KEY_HIDDEN')}`);
+            // Add category if specified (Torznab format)
+            if (category) {
+                params.append('cat', category);
+            }
+            
+            const url = `${torznabUrl}?${params}`;
+            
+            console.log(`🔍 [Jackettio] Torznab search for: "${query}" (category: ${category || 'all'}) ${italianOnly ? '[ITALIAN ONLY]' : ''}`);
             
             const headers = {
-                'User-Agent': 'Stremizio/2.0'
+                'User-Agent': 'Stremizio/2.0',
+                'Accept': 'application/json, application/xml, text/xml'
             };
             
             // Add password if provided (for authenticated instances)
             if (this.password) {
                 headers['Authorization'] = `Basic ${btoa(`api:${this.password}`)}`;
-                console.log(`🔍 [Jackett] Using Basic Authentication`);
             }
             
             const response = await fetch(url, { headers });
 
             if (!response.ok) {
-                const errorText = await response.text();
-                console.error(`🔍 ❌ [Jackett] Torznab API error (${response.status}):`, errorText.substring(0, 200));
-                throw new Error(`Jackett API error: ${response.status}`);
+                console.error(`❌ [Jackettio] API error: ${response.status} ${response.statusText}`);
+                const errorText = await response.text().catch(() => 'Unable to read error');
+                console.error(`❌ [Jackettio] Error response: ${errorText.substring(0, 500)}`);
+                throw new Error(`Jackettio API error: ${response.status}`);
             }
 
-            // Parse Torznab XML response
-            const xmlText = await response.text();
-            const parser = new DOMParser();
-            const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+            const contentType = response.headers.get('content-type') || '';
+            let results = [];
             
-            const items = xmlDoc.getElementsByTagName('item');
+            // Jackett can return JSON or XML depending on configuration
+            if (contentType.includes('application/json')) {
+                const data = await response.json();
+                results = data.Results || [];
+            } else {
+                // Parse XML response (Torznab default)
+                const xmlText = await response.text();
+                results = this.parseXmlResults(xmlText);
+            }
             
-            if (items.length === 0) {
-                console.log('🔍 [Jackett] No results found in Torznab response.');
+            if (results.length === 0) {
+                console.log('🔍 [Jackettio] No results found.');
                 return [];
             }
 
-            console.log(`🔍 [Jackett] Found ${items.length} raw results from Torznab API.`);
+            console.log(`🔍 [Jackettio] Found ${results.length} raw results.`);
             
-            // Parse Torznab XML results
-            let skippedNoHash = 0;
-            let skippedNonItalian = 0;
-            
-            const streams = [];
-            
-            for (let i = 0; i < items.length; i++) {
-                const item = items[i];
+            // Parse Jackett results to our standard format
+            const streams = results.map(result => {
+                // Jackett può restituire sia magnet che torrent file
+                let magnetLink = result.MagnetUri || result.magneturl || result.Link;
                 
-                // Extract basic info
-                const title = item.getElementsByTagName('title')[0]?.textContent || '';
-                const link = item.getElementsByTagName('link')[0]?.textContent || '';
-                const pubDate = item.getElementsByTagName('pubDate')[0]?.textContent || '';
-                
+                // Se è un .torrent file, prova a estrarre l'hash
+                if (!magnetLink || !magnetLink.startsWith('magnet:')) {
+                    console.log(`⚠️ [Jackettio] Skipping non-magnet result: ${result.Title || result.title || 'Unknown'}`);
+                    return null;
+                }
+
+                const title = result.Title || result.title || '';
+                const infoHash = extractInfoHash(magnetLink);
+                if (!infoHash) {
+                    console.log(`⚠️ [Jackettio] Failed to extract hash from: ${title}`);
+                    return null;
+                }
+
                 // ✅ FILTER: Italian only check
                 if (italianOnly && !isItalian(title)) {
-                    skippedNonItalian++;
-                    continue;
+                    console.log(`🚫 [Jackettio] Skipping non-Italian: ${title}`);
+                    return null;
                 }
+
+                // Parse seeders/peers
+                const seeders = result.Seeders || result.seeders || 0;
+                const leechers = result.Peers || result.peers || 0;
                 
-                // Extract Torznab attributes
-                const attrs = item.getElementsByTagName('torznab:attr');
-                let infoHash = null;
-                let seeders = 0;
-                let peers = 0;
-                let size = 0;
-                let magnetUrl = null;
-                let category = 'Unknown';
-                let tracker = 'Unknown';
-                
-                for (let j = 0; j < attrs.length; j++) {
-                    const attr = attrs[j];
-                    const name = attr.getAttribute('name');
-                    const value = attr.getAttribute('value');
-                    
-                    switch (name) {
-                        case 'infohash':
-                            infoHash = value?.toUpperCase();
-                            break;
-                        case 'seeders':
-                            seeders = parseInt(value) || 0;
-                            break;
-                        case 'peers':
-                            peers = parseInt(value) || 0;
-                            break;
-                        case 'size':
-                            size = parseInt(value) || 0;
-                            break;
-                        case 'magneturl':
-                            magnetUrl = value;
-                            break;
-                        case 'category':
-                            if (value?.includes('2000') || value?.toLowerCase().includes('movie')) {
-                                category = 'Movies';
-                            } else if (value?.includes('5000') || value?.toLowerCase().includes('tv')) {
-                                category = 'TV';
-                            } else if (value?.includes('5070') || value?.toLowerCase().includes('anime')) {
-                                category = 'Anime';
-                            }
-                            break;
-                    }
+                // Parse size
+                const sizeInBytes = result.Size || result.size || 0;
+                const sizeStr = formatBytes(sizeInBytes);
+
+                // Determine category
+                let outputCategory = 'Unknown';
+                const categoryDesc = (result.CategoryDesc || result.category || '').toLowerCase();
+                if (categoryDesc.includes('movie')) {
+                    outputCategory = 'Movies';
+                } else if (categoryDesc.includes('tv') || categoryDesc.includes('series')) {
+                    outputCategory = 'TV';
+                } else if (categoryDesc.includes('anime')) {
+                    outputCategory = 'Anime';
                 }
-                
-                // Try to extract tracker from comments or description
-                const description = item.getElementsByTagName('jackettindexer')?.[0]?.textContent;
-                if (description) {
-                    tracker = description;
-                }
-                
-                // If no infohash from attributes, try to extract from magnet or link
-                if (!infoHash) {
-                    if (magnetUrl && magnetUrl.startsWith('magnet:')) {
-                        infoHash = extractInfoHash(magnetUrl);
-                    } else if (link && link.startsWith('magnet:')) {
-                        infoHash = extractInfoHash(link);
-                        magnetUrl = link;
-                    }
-                }
-                
-                if (!infoHash) {
-                    console.log(`🔍 [Jackett] Skipping "${title.substring(0, 50)}..." - no info hash`);
-                    skippedNoHash++;
-                    continue;
-                }
-                
-                // Create magnet link if we don't have one
-                if (!magnetUrl || !magnetUrl.startsWith('magnet:')) {
-                    const encodedName = encodeURIComponent(title);
-                    magnetUrl = `magnet:?xt=urn:btih:${infoHash}&dn=${encodedName}`;
-                }
-                
-                streams.push({
-                    magnetLink: magnetUrl,
+
+                return {
+                    magnetLink: magnetLink,
                     websiteTitle: title,
                     title: title,
                     filename: title,
                     quality: extractQuality(title),
-                    size: formatBytes(size),
-                    source: `Jackett (${tracker})`,
+                    size: sizeStr,
+                    source: 'Jackettio',
                     seeders: seeders,
-                    leechers: peers,
+                    leechers: leechers,
                     infoHash: infoHash,
-                    mainFileSize: size,
-                    pubDate: pubDate || new Date().toISOString(),
-                    categories: [category]
-                });
-            }
+                    mainFileSize: sizeInBytes,
+                    pubDate: result.PublishDate || result.publishDate || new Date().toISOString(),
+                    categories: [outputCategory]
+                };
+            }).filter(Boolean);
 
-            console.log(`🔍 [Jackett] Processing summary:`);
-            console.log(`🔍 [Jackett]   - Valid results: ${streams.length}`);
-            console.log(`🔍 [Jackett]   - Skipped (no hash): ${skippedNoHash}`);
-            if (italianOnly) {
-                console.log(`🔍 [Jackett]   - Skipped (non-Italian): ${skippedNonItalian}`);
-            }
-            
+            console.log(`🔍 [Jackettio] Successfully parsed ${streams.length} ${italianOnly ? 'ITALIAN ' : ''}streams.`);
             return streams;
 
         } catch (error) {
-            console.error(`🔍 ❌ [Jackett] Search failed:`, error.message);
-            console.error(`🔍 ❌ [Jackett] Error details:`, error);
+            console.error(`❌ [Jackettio] Search failed:`, error.message);
+            return [];
+        }
+    }
+    
+    // Parse XML response from Torznab API
+    parseXmlResults(xmlText) {
+        try {
+            const $ = cheerio.load(xmlText, { xmlMode: true });
+            const items = [];
+            
+            $('item').each((i, elem) => {
+                const $item = $(elem);
+                const $enclosure = $item.find('enclosure').first();
+                
+                const result = {
+                    Title: $item.find('title').text(),
+                    Link: $item.find('link').text(),
+                    Size: parseInt($enclosure.attr('length')) || 0,
+                    PublishDate: $item.find('pubDate').text(),
+                    CategoryDesc: $item.find('category').text(),
+                };
+                
+                // Extract torznab attributes
+                $item.find('torznab\\:attr, attr').each((j, attr) => {
+                    const $attr = $(attr);
+                    const name = $attr.attr('name');
+                    const value = $attr.attr('value');
+                    
+                    if (name === 'magneturl') result.MagnetUri = value;
+                    if (name === 'seeders') result.Seeders = parseInt(value) || 0;
+                    if (name === 'peers') result.Peers = parseInt(value) || 0;
+                    if (name === 'size') result.Size = parseInt(value) || result.Size;
+                });
+                
+                items.push(result);
+            });
+            
+            console.log(`🔍 [Jackettio] Parsed ${items.length} items from XML`);
+            return items;
+        } catch (error) {
+            console.error('❌ [Jackettio] XML parsing failed:', error.message);
             return [];
         }
     }
@@ -707,11 +700,9 @@ class Jackettio {
 
 async function fetchJackettioData(searchQuery, type = 'movie', jackettioInstance = null) {
     if (!jackettioInstance) {
-        console.log('🔍 [Jackettio] Instance not configured, skipping.');
+        console.log('⚠️ [Jackettio] Instance not configured, skipping.');
         return [];
     }
-
-    console.log(`🔍 [Jackettio] fetchJackettioData: "${searchQuery}" type=${type}`);
 
     try {
         // Map type to Jackett category codes
@@ -724,12 +715,8 @@ async function fetchJackettioData(searchQuery, type = 'movie', jackettioInstance
             category = '5070'; // TV/Anime
         }
 
-        console.log(`🔍 [Jackettio] Using category: ${category || 'all categories'}`);
-        
         // ✅ ONLY ITALIAN RESULTS
         const results = await jackettioInstance.search(searchQuery, category, true);
-        
-        console.log(`🔍 ✓ [Jackettio] Returning ${results.length} results to caller`);
         return results;
 
     } catch (error) {
@@ -1278,7 +1265,6 @@ class Torbox {
     async checkCache(hashes) {
         if (!hashes || hashes.length === 0) return {};
         
-        console.log(`📦 [Torbox] Checking cache for ${hashes.length} hashes...`);
         const results = {};
         
         // Torbox supports bulk check via POST
@@ -1297,18 +1283,12 @@ class Torbox {
             });
 
             if (!response.ok) {
-                const errorText = await response.text();
-                console.error(`📦 ❌ Torbox checkCache failed (${response.status}):`, errorText);
                 throw new Error(`Torbox API error: ${response.status}`);
             }
 
             const data = await response.json();
-            console.log(`📦 ✓ Torbox cache check response:`, JSON.stringify(data).substring(0, 200) + '...');
             
             if (data.success && data.data) {
-                const cachedCount = Object.values(data.data).filter(info => info && info.cached).length;
-                console.log(`📦 ✓ Found ${cachedCount} cached torrents in Torbox`);
-                
                 hashes.forEach(hash => {
                     const cacheInfo = data.data[hash.toLowerCase()];
                     const isCached = cacheInfo && cacheInfo.cached === true;
@@ -1316,7 +1296,6 @@ class Torbox {
                     let isActuallyCachedAndStreamable = false;
                     
                     if (isCached && cacheInfo.files && cacheInfo.files.length > 0) {
-                        console.log(`📦 [${hash.substring(0, 8)}...] Cached with ${cacheInfo.files.length} files`);
                         const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
                         const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
                         
@@ -1340,9 +1319,8 @@ class Torbox {
                             // Store the hash and best file info for later retrieval
                             downloadLink = hash; // We'll use this to request the actual download later
                             isActuallyCachedAndStreamable = true;
-                            console.log(`📦 ✓ [${hash.substring(0, 8)}...] Best file: ${bestFile.name} (${(bestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
                         } else {
-                            console.warn(`📦 ⚠️ [${hash.substring(0, 8)}...] Torrent is in cache but no suitable video file found.`);
+                            console.warn(`⚠️ Torrent ${hash} is in Torbox cache but no suitable video file found.`);
                         }
                     }
                     
@@ -1355,18 +1333,16 @@ class Torbox {
                 });
             }
         } catch (error) {
-            console.error('📦 ❌ Torbox cache check failed:', error);
+            console.error('Torbox cache check failed:', error);
             hashes.forEach(hash => {
                 results[hash.toLowerCase()] = { cached: false, downloadLink: null, service: 'Torbox' };
             });
         }
         
-        console.log(`📦 [Torbox] Cache check complete: ${Object.values(results).filter(r => r.cached).length}/${hashes.length} cached`);
         return results;
     }
 
     async addTorrent(magnetLink) {
-        console.log(`📦 [Torbox] Adding torrent to account...`);
         const response = await fetch(`${this.baseUrl}/torrents/createtorrent`, {
             method: 'POST',
             headers: {
@@ -1380,49 +1356,37 @@ class Torbox {
         });
 
         if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`📦 ❌ Torbox addTorrent failed (${response.status}):`, errorText);
             throw new Error(`Torbox API error: ${response.status}`);
         }
 
         const data = await response.json();
         if (!data.success) {
-            console.error(`📦 ❌ Torbox error:`, data.error || 'Unknown error');
             throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
         }
         
-        console.log(`📦 ✓ Torrent added to Torbox:`, data.data.name || data.data.id);
         return data.data;
     }
 
     async getTorrents() {
-        // Torbox API v1: GET /torrents/mylist
-        const response = await fetch(`${this.baseUrl}/torrents/mylist?bypass_cache=true`, {
-            method: 'GET',
+        const response = await fetch(`${this.baseUrl}/torrents/mylist`, {
             headers: { 
-                'Authorization': `Bearer ${this.apiKey}`,
-                'Content-Type': 'application/json'
+                'Authorization': `Bearer ${this.apiKey}` 
             }
         });
         
         if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`Torbox getTorrents failed (${response.status}):`, errorText);
             throw new Error(`Failed to get torrents list from Torbox: ${response.status}`);
         }
         
         const data = await response.json();
         if (!data.success) {
-            console.error(`📦 ❌ Torbox error:`, data.error || 'Unknown error');
             throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
         }
         
-        console.log(`📦 ✓ Found ${(data.data || []).length} torrents in Torbox account`);
         return data.data || [];
     }
 
     async deleteTorrent(torrentId) {
-        console.log(`📦 [Torbox] Deleting torrent ${torrentId}...`);
         const response = await fetch(`${this.baseUrl}/torrents/controltorrent`, {
             method: 'POST',
             headers: {
@@ -1442,44 +1406,31 @@ class Torbox {
     }
 
     async getTorrentInfo(torrentId) {
-        console.log(`📦 [Torbox] Getting torrent info for ID ${torrentId}...`);
         const torrents = await this.getTorrents();
         const torrent = torrents.find(t => t.id === parseInt(torrentId));
         
         if (!torrent) {
-            console.log(`📦 ❌ Torrent ${torrentId} not found - may have been deleted or expired`);
-            return null;
+            throw new Error(`Torrent ${torrentId} not found in Torbox`);
         }
         
-        console.log(`📦 ✓ Found torrent: ${torrent.name} (${torrent.download_state})`);
         return torrent;
     }
 
     async createDownload(torrentId, fileId = null) {
-        console.log(`📦 [Torbox] Creating download link for torrent ${torrentId}${fileId ? ` file ${fileId}` : ''}...`);
-        
-        // First check if torrent exists
-        const torrentInfo = await this.getTorrentInfo(torrentId);
-        if (!torrentInfo) {
-            console.log(`📦 ❌ Cannot create download link - torrent ${torrentId} not found`);
-            throw new Error(`Torrent ${torrentId} not found or expired`);
-        }
-        
-        // Torbox API v1: The correct endpoint is /torrents/requestdl with query params
-        // URL format: /torrents/requestdl?token={api_key}&torrent_id={id}&file_id={file_id}&zip_link=false
+        // Torbox uses /torrents/requestdl endpoint to get download links
+        // If fileId is provided, get specific file, otherwise get whole torrent
         const params = new URLSearchParams({
             token: this.apiKey,
-            torrent_id: torrentId.toString(),
-            zip_link: 'false'
+            torrent_id: torrentId
         });
         
         if (fileId) {
-            params.set('file_id', fileId.toString());
+            params.append('file_id', fileId);
         }
         
-        const url = `${this.baseUrl}/torrents/requestdl?${params}`;
+        params.append('zip_link', 'false');
 
-        const response = await fetch(url, {
+        const response = await fetch(`${this.baseUrl}/torrents/requestdl?${params}`, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${this.apiKey}`
@@ -1488,25 +1439,18 @@ class Torbox {
 
         if (!response.ok) {
             const errorText = await response.text();
-            console.error(`📦 ❌ Torbox createDownload failed (${response.status}):`, errorText);
-            throw new Error(`Torbox API error: ${response.status}`);
+            console.error(`❌ Torbox requestdl error (${response.status}):`, errorText);
+            throw new Error(`Torbox API error: ${response.status} - ${errorText}`);
         }
 
         const data = await response.json();
+        
         if (!data.success) {
-            const errorMsg = data.error || data.detail || 'Unknown error';
-            console.error(`📦 ❌ Torbox error:`, errorMsg);
-            
-            // Handle specific errors
-            if (errorMsg === 'DATABASE_ERROR' || data.detail?.includes('DATABASE_ERROR')) {
-                throw new Error('Torrent non disponibile o scaduto. Prova a scaricarlo di nuovo.');
-            }
-            
-            throw new Error(`Torbox error: ${errorMsg}`);
+            throw new Error(`Torbox error: ${data.error || data.detail || 'Unknown error'}`);
         }
         
-        console.log(`📦 ✓ Download link created successfully`);
-        return data.data; // Returns direct download URL
+        // Torbox returns direct download URL in data field
+        return data.data; // Returns direct download URL string
     }
 }
 
@@ -1520,35 +1464,26 @@ function createDebridServices(config) {
         mediaflowProxy: null // NEW: MediaFlow Proxy config
     };
     
-    // ✅ Fallback to ENV variables
-    const rdKey = config.rd_key || process.env.RD_API_KEY;
-    const torboxKey = config.torbox_key || process.env.TORBOX_API_KEY;
-    const useRd = config.use_rd || (process.env.RD_API_KEY ? true : false);
-    const useTb = config.use_torbox || (process.env.TORBOX_API_KEY ? true : false);
-    
     // Check RealDebrid
-    if (useRd && rdKey && rdKey.length > 5) {
+    if (config.use_rd && config.rd_key && config.rd_key.length > 5) {
         console.log('🔵 Real-Debrid enabled');
-        services.realdebrid = new RealDebrid(rdKey);
+        services.realdebrid = new RealDebrid(config.rd_key);
         services.useRealDebrid = true;
     }
     
     // Check Torbox
-    if (useTb && torboxKey && torboxKey.length > 5) {
+    if (config.use_torbox && config.torbox_key && config.torbox_key.length > 5) {
         console.log('📦 Torbox enabled');
-        services.torbox = new Torbox(torboxKey);
+        services.torbox = new Torbox(config.torbox_key);
         services.useTorbox = true;
     }
     
     // Check MediaFlow Proxy (for RD sharing)
-    const mediaflowUrl = config.mediaflow_url || process.env.MEDIAFLOW_URL;
-    const mediaflowPassword = config.mediaflow_password || process.env.MEDIAFLOW_PASSWORD;
-    
-    if (mediaflowUrl && mediaflowPassword) {
+    if (config.mediaflow_url && config.mediaflow_password) {
         console.log('🔀 MediaFlow Proxy enabled for RD sharing');
         services.mediaflowProxy = {
-            url: mediaflowUrl,
-            password: mediaflowPassword
+            url: config.mediaflow_url,
+            password: config.mediaflow_password
         };
     }
     
@@ -1908,7 +1843,7 @@ async function handleStream(type, id, config, workerOrigin) {
     
     try {
         // Usa la configurazione passata, con fallback alle variabili d'ambiente
-        const tmdbKey = config.tmdb_key || process.env.TMDB_API_KEY;
+        const tmdbKey = config.tmdb_key;
         
         // ✅ Use debrid services factory (supports both RD and Torbox)
         const debridServices = createDebridServices(config);
@@ -2787,28 +2722,19 @@ export default async function handler(req, res) {
         }
 
         // Stream endpoint (main functionality)
-        // Gestisce sia /{config}/stream/{type}/{id} che /stream/{type}/{id}
+        // Gestisce il formato /{config}/stream/{type}/{id} inviato da Stremio
         if (url.pathname.includes('/stream/')) {
-            const pathParts = url.pathname.split('/').filter(p => p); // Rimuovi elementi vuoti
-            
+            const pathParts = url.pathname.split('/'); // e.g., ['', '{config}', 'stream', '{type}', '{id}.json']
+
+            // Estrae la configurazione dal primo segmento del path
+            const encodedConfigStr = pathParts[1]; 
             let config = {};
-            let type, idWithSuffix;
-            
-            // Controlla se il primo elemento è 'stream' (no config) o un config base64
-            if (pathParts[0] === 'stream') {
-                // Formato: /stream/{type}/{id}
-                type = pathParts[1];
-                idWithSuffix = pathParts[2] || '';
-            } else {
-                // Formato: /{config}/stream/{type}/{id}
-                const encodedConfigStr = pathParts[0];
+            if (encodedConfigStr) {
                 try {
                     config = JSON.parse(atob(encodedConfigStr));
                 } catch (e) {
-                    console.error("Errore nel parsing della configurazione dall'URL:", e);
+                    console.error("Errore nel parsing della configurazione (segmento 1) dall'URL:", e);
                 }
-                type = pathParts[2];
-                idWithSuffix = pathParts[3] || '';
             }
 
             // ✅ Add Jackettio ENV vars if available (fallback for private use)
@@ -2826,9 +2752,12 @@ export default async function handler(req, res) {
                 console.log('🔀 [MediaFlow] Using ENV configuration for RD sharing');
             }
 
+            // Estrae tipo e id dalle posizioni corrette
+            const type = pathParts[3];
+            const idWithSuffix = pathParts[4] || '';
             const id = idWithSuffix.replace(/\.json$/, '');
 
-            if (!type || !id || id.includes('config=')) {
+            if (!type || !id || id.includes('config=')) { // Aggiunto controllo per evitare ID errati
                 res.setHeader('Content-Type', 'application/json');
                 return res.status(400).send(JSON.stringify({ streams: [], error: 'Invalid stream path' }));
             }
@@ -3409,30 +3338,8 @@ export default async function handler(req, res) {
                 const torbox = new Torbox(userConfig.torbox_key);
                 const torrentInfo = await torbox.getTorrentInfo(torrentId);
 
-                console.log(`📦 [Torbox] Torrent info:`, {
-                    id: torrentInfo.id,
-                    name: torrentInfo.name,
-                    download_state: torrentInfo.download_state,
-                    download_finished: torrentInfo.download_finished,
-                    expires_at: torrentInfo.expires_at,
-                    active: torrentInfo.active
-                });
-
-                // Check if torrent is expired or has issues
-                if (torrentInfo.download_state === 'expired') {
-                    console.warn(`📦 ⚠️ Torrent ${torrentId} is expired`);
-                    return res.status(410).send('<h1>Torrent Scaduto</h1><p>Questo torrent è scaduto da Torbox. Cercalo di nuovo per scaricarlo.</p>');
-                }
-
-                if (torrentInfo.download_state === 'reported missing' || torrentInfo.download_state === 'error') {
-                    console.warn(`📦 ⚠️ Torrent ${torrentId} has error state: ${torrentInfo.download_state}`);
-                    return res.status(410).send(`<h1>Torrent Non Disponibile</h1><p>Stato: ${torrentInfo.download_state}. Prova a cercarlo di nuovo.</p>`);
-                }
-
                 if (!torrentInfo.download_finished) {
-                    const progress = Math.round(torrentInfo.progress * 100);
-                    console.log(`📦 ⏳ Torrent ${torrentId} still downloading: ${progress}%`);
-                    return res.status(202).send(`<h1>Download in Corso</h1><p>Il torrent è al ${progress}%. Riprova tra qualche minuto.</p>`);
+                    throw new Error('Il torrent non è ancora completato.');
                 }
 
                 const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
