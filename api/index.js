@@ -3,6 +3,7 @@
 import * as cheerio from 'cheerio';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { DOMParser } from 'xmldom';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
@@ -513,31 +514,39 @@ async function fetchKnabenData(searchQuery, type = 'movie') {
 
 // --- FINE NUOVA SEZIONE ---
 
-// --- NUOVA SEZIONE: JACKETTIO INTEGRATION ---
+// --- NUOVA SEZIONE: JACKETTIO/JACKETT INTEGRATION ---
 
 class Jackettio {
     constructor(baseUrl, apiKey, password = null) {
-        this.baseUrl = baseUrl; // e.g., "https://eschiano-jackett.elfhosted.com"
+        // Clean up base URL - remove trailing slashes and API path if present
+        this.baseUrl = baseUrl
+            .replace(/\/+$/, '') // Remove trailing slashes
+            .replace(/\/api\/v2\.0.*$/, ''); // Remove API path if accidentally included
+        
         this.apiKey = apiKey;
         this.password = password; // Optional password for authenticated instances
+        
+        console.log(`🔍 [Jackett] Initialized with base URL: ${this.baseUrl}`);
     }
 
     async search(query, category = null, italianOnly = false) {
         if (!query) return [];
         
-        console.log(`🔍 [Jackettio] Starting search...`);
-        console.log(`🔍 [Jackettio] Query: "${query}" | Category: ${category || 'all'} | Italian only: ${italianOnly}`);
-        console.log(`🔍 [Jackettio] Base URL: ${this.baseUrl}`);
+        console.log(`🔍 [Jackett] Starting Torznab search...`);
+        console.log(`🔍 [Jackett] Query: "${query}" | Category: ${category || 'all'} | Italian only: ${italianOnly}`);
+        console.log(`🔍 [Jackett] Base URL: ${this.baseUrl}`);
         
         try {
+            // Use Torznab endpoint which includes info hash in results
             const params = new URLSearchParams({
                 apikey: this.apiKey,
+                t: 'search',
                 q: query,
                 ...(category && { cat: category }) // 2000=Movies, 5000=TV, 5070=Anime
             });
             
-            const url = `${this.baseUrl}/api/v2.0/indexers/all/results?${params}`;
-            console.log(`🔍 [Jackettio] Full URL: ${url.replace(this.apiKey, 'API_KEY_HIDDEN')}`);
+            const url = `${this.baseUrl}/api/v2.0/indexers/all/results/torznab?${params}`;
+            console.log(`🔍 [Jackett] Torznab URL: ${url.replace(this.apiKey, 'API_KEY_HIDDEN')}`);
             
             const headers = {
                 'User-Agent': 'Stremizio/2.0'
@@ -546,102 +555,151 @@ class Jackettio {
             // Add password if provided (for authenticated instances)
             if (this.password) {
                 headers['Authorization'] = `Basic ${btoa(`api:${this.password}`)}`;
-                console.log(`🔍 [Jackettio] Using Basic Authentication`);
+                console.log(`🔍 [Jackett] Using Basic Authentication`);
             }
             
             const response = await fetch(url, { headers });
 
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error(`🔍 ❌ [Jackettio] API error (${response.status}):`, errorText.substring(0, 200));
-                throw new Error(`Jackettio API error: ${response.status}`);
+                console.error(`🔍 ❌ [Jackett] Torznab API error (${response.status}):`, errorText.substring(0, 200));
+                throw new Error(`Jackett API error: ${response.status}`);
             }
 
-            const data = await response.json();
+            // Parse Torznab XML response
+            const xmlText = await response.text();
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
             
-            if (!data.Results || data.Results.length === 0) {
-                console.log('🔍 [Jackettio] No results found.');
+            const items = xmlDoc.getElementsByTagName('item');
+            
+            if (items.length === 0) {
+                console.log('🔍 [Jackett] No results found in Torznab response.');
                 return [];
             }
 
-            console.log(`🔍 [Jackettio] Found ${data.Results.length} raw results from API.`);
+            console.log(`🔍 [Jackett] Found ${items.length} raw results from Torznab API.`);
             
-            // Parse Jackett results to our standard format
-            let skippedNonMagnet = 0;
+            // Parse Torznab XML results
             let skippedNoHash = 0;
             let skippedNonItalian = 0;
             
-            const streams = data.Results.map(result => {
-                // Jackett può restituire sia magnet che torrent file
-                let magnetLink = result.MagnetUri || result.Link;
+            const streams = [];
+            
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
                 
-                // Se è un .torrent file, prova a estrarre l'hash
-                if (!magnetLink || !magnetLink.startsWith('magnet:')) {
-                    skippedNonMagnet++;
-                    return null;
-                }
-
-                const infoHash = extractInfoHash(magnetLink);
-                if (!infoHash) {
-                    skippedNoHash++;
-                    return null;
-                }
-
+                // Extract basic info
+                const title = item.getElementsByTagName('title')[0]?.textContent || '';
+                const link = item.getElementsByTagName('link')[0]?.textContent || '';
+                const pubDate = item.getElementsByTagName('pubDate')[0]?.textContent || '';
+                
                 // ✅ FILTER: Italian only check
-                if (italianOnly && !isItalian(result.Title)) {
+                if (italianOnly && !isItalian(title)) {
                     skippedNonItalian++;
-                    return null;
+                    continue;
                 }
-
-                // Parse seeders/peers
-                const seeders = result.Seeders || 0;
-                const leechers = result.Peers || 0;
                 
-                // Parse size
-                const sizeInBytes = result.Size || 0;
-                const sizeStr = formatBytes(sizeInBytes);
-
-                // Determine category
-                let outputCategory = 'Unknown';
-                const categoryDesc = (result.CategoryDesc || '').toLowerCase();
-                if (categoryDesc.includes('movie')) {
-                    outputCategory = 'Movies';
-                } else if (categoryDesc.includes('tv') || categoryDesc.includes('series')) {
-                    outputCategory = 'TV';
-                } else if (categoryDesc.includes('anime')) {
-                    outputCategory = 'Anime';
+                // Extract Torznab attributes
+                const attrs = item.getElementsByTagName('torznab:attr');
+                let infoHash = null;
+                let seeders = 0;
+                let peers = 0;
+                let size = 0;
+                let magnetUrl = null;
+                let category = 'Unknown';
+                let tracker = 'Unknown';
+                
+                for (let j = 0; j < attrs.length; j++) {
+                    const attr = attrs[j];
+                    const name = attr.getAttribute('name');
+                    const value = attr.getAttribute('value');
+                    
+                    switch (name) {
+                        case 'infohash':
+                            infoHash = value?.toUpperCase();
+                            break;
+                        case 'seeders':
+                            seeders = parseInt(value) || 0;
+                            break;
+                        case 'peers':
+                            peers = parseInt(value) || 0;
+                            break;
+                        case 'size':
+                            size = parseInt(value) || 0;
+                            break;
+                        case 'magneturl':
+                            magnetUrl = value;
+                            break;
+                        case 'category':
+                            if (value?.includes('2000') || value?.toLowerCase().includes('movie')) {
+                                category = 'Movies';
+                            } else if (value?.includes('5000') || value?.toLowerCase().includes('tv')) {
+                                category = 'TV';
+                            } else if (value?.includes('5070') || value?.toLowerCase().includes('anime')) {
+                                category = 'Anime';
+                            }
+                            break;
+                    }
                 }
-
-                return {
-                    magnetLink: magnetLink,
-                    websiteTitle: result.Title,
-                    title: result.Title,
-                    filename: result.Title,
-                    quality: extractQuality(result.Title),
-                    size: sizeStr,
-                    source: 'Jackettio',
+                
+                // Try to extract tracker from comments or description
+                const description = item.getElementsByTagName('jackettindexer')?.[0]?.textContent;
+                if (description) {
+                    tracker = description;
+                }
+                
+                // If no infohash from attributes, try to extract from magnet or link
+                if (!infoHash) {
+                    if (magnetUrl && magnetUrl.startsWith('magnet:')) {
+                        infoHash = extractInfoHash(magnetUrl);
+                    } else if (link && link.startsWith('magnet:')) {
+                        infoHash = extractInfoHash(link);
+                        magnetUrl = link;
+                    }
+                }
+                
+                if (!infoHash) {
+                    console.log(`🔍 [Jackett] Skipping "${title.substring(0, 50)}..." - no info hash`);
+                    skippedNoHash++;
+                    continue;
+                }
+                
+                // Create magnet link if we don't have one
+                if (!magnetUrl || !magnetUrl.startsWith('magnet:')) {
+                    const encodedName = encodeURIComponent(title);
+                    magnetUrl = `magnet:?xt=urn:btih:${infoHash}&dn=${encodedName}`;
+                }
+                
+                streams.push({
+                    magnetLink: magnetUrl,
+                    websiteTitle: title,
+                    title: title,
+                    filename: title,
+                    quality: extractQuality(title),
+                    size: formatBytes(size),
+                    source: `Jackett (${tracker})`,
                     seeders: seeders,
-                    leechers: leechers,
+                    leechers: peers,
                     infoHash: infoHash,
-                    mainFileSize: sizeInBytes,
-                    pubDate: result.PublishDate || new Date().toISOString(),
-                    categories: [outputCategory]
-                };
-            }).filter(Boolean);
+                    mainFileSize: size,
+                    pubDate: pubDate || new Date().toISOString(),
+                    categories: [category]
+                });
+            }
 
-            console.log(`🔍 [Jackettio] Filtering summary:`);
-            console.log(`🔍 [Jackettio]   - Valid Italian results: ${streams.length}`);
-            console.log(`🔍 [Jackettio]   - Skipped (non-magnet): ${skippedNonMagnet}`);
-            console.log(`🔍 [Jackettio]   - Skipped (no hash): ${skippedNoHash}`);
+            console.log(`🔍 [Jackett] Processing summary:`);
+            console.log(`🔍 [Jackett]   - Valid results: ${streams.length}`);
+            console.log(`🔍 [Jackett]   - Skipped (no hash): ${skippedNoHash}`);
             if (italianOnly) {
-                console.log(`🔍 [Jackettio]   - Skipped (non-Italian): ${skippedNonItalian}`);
+                console.log(`🔍 [Jackett]   - Skipped (non-Italian): ${skippedNonItalian}`);
             }
             
             return streams;
 
         } catch (error) {
-            console.error(`🔍 ❌ [Jackettio] Search failed:`, error.message);
-            console.error(`🔍 ❌ [Jackettio] Error details:`, error);
+            console.error(`🔍 ❌ [Jackett] Search failed:`, error.message);
+            console.error(`🔍 ❌ [Jackett] Error details:`, error);
             return [];
         }
     }
@@ -1462,26 +1520,35 @@ function createDebridServices(config) {
         mediaflowProxy: null // NEW: MediaFlow Proxy config
     };
     
+    // ✅ Fallback to ENV variables
+    const rdKey = config.rd_key || process.env.RD_API_KEY;
+    const torboxKey = config.torbox_key || process.env.TORBOX_API_KEY;
+    const useRd = config.use_rd || (process.env.RD_API_KEY ? true : false);
+    const useTb = config.use_torbox || (process.env.TORBOX_API_KEY ? true : false);
+    
     // Check RealDebrid
-    if (config.use_rd && config.rd_key && config.rd_key.length > 5) {
+    if (useRd && rdKey && rdKey.length > 5) {
         console.log('🔵 Real-Debrid enabled');
-        services.realdebrid = new RealDebrid(config.rd_key);
+        services.realdebrid = new RealDebrid(rdKey);
         services.useRealDebrid = true;
     }
     
     // Check Torbox
-    if (config.use_torbox && config.torbox_key && config.torbox_key.length > 5) {
+    if (useTb && torboxKey && torboxKey.length > 5) {
         console.log('📦 Torbox enabled');
-        services.torbox = new Torbox(config.torbox_key);
+        services.torbox = new Torbox(torboxKey);
         services.useTorbox = true;
     }
     
     // Check MediaFlow Proxy (for RD sharing)
-    if (config.mediaflow_url && config.mediaflow_password) {
+    const mediaflowUrl = config.mediaflow_url || process.env.MEDIAFLOW_URL;
+    const mediaflowPassword = config.mediaflow_password || process.env.MEDIAFLOW_PASSWORD;
+    
+    if (mediaflowUrl && mediaflowPassword) {
         console.log('🔀 MediaFlow Proxy enabled for RD sharing');
         services.mediaflowProxy = {
-            url: config.mediaflow_url,
-            password: config.mediaflow_password
+            url: mediaflowUrl,
+            password: mediaflowPassword
         };
     }
     
@@ -1841,7 +1908,7 @@ async function handleStream(type, id, config, workerOrigin) {
     
     try {
         // Usa la configurazione passata, con fallback alle variabili d'ambiente
-        const tmdbKey = config.tmdb_key;
+        const tmdbKey = config.tmdb_key || process.env.TMDB_API_KEY;
         
         // ✅ Use debrid services factory (supports both RD and Torbox)
         const debridServices = createDebridServices(config);
@@ -2720,19 +2787,28 @@ export default async function handler(req, res) {
         }
 
         // Stream endpoint (main functionality)
-        // Gestisce il formato /{config}/stream/{type}/{id} inviato da Stremio
+        // Gestisce sia /{config}/stream/{type}/{id} che /stream/{type}/{id}
         if (url.pathname.includes('/stream/')) {
-            const pathParts = url.pathname.split('/'); // e.g., ['', '{config}', 'stream', '{type}', '{id}.json']
-
-            // Estrae la configurazione dal primo segmento del path
-            const encodedConfigStr = pathParts[1]; 
+            const pathParts = url.pathname.split('/').filter(p => p); // Rimuovi elementi vuoti
+            
             let config = {};
-            if (encodedConfigStr) {
+            let type, idWithSuffix;
+            
+            // Controlla se il primo elemento è 'stream' (no config) o un config base64
+            if (pathParts[0] === 'stream') {
+                // Formato: /stream/{type}/{id}
+                type = pathParts[1];
+                idWithSuffix = pathParts[2] || '';
+            } else {
+                // Formato: /{config}/stream/{type}/{id}
+                const encodedConfigStr = pathParts[0];
                 try {
                     config = JSON.parse(atob(encodedConfigStr));
                 } catch (e) {
-                    console.error("Errore nel parsing della configurazione (segmento 1) dall'URL:", e);
+                    console.error("Errore nel parsing della configurazione dall'URL:", e);
                 }
+                type = pathParts[2];
+                idWithSuffix = pathParts[3] || '';
             }
 
             // ✅ Add Jackettio ENV vars if available (fallback for private use)
@@ -2750,12 +2826,9 @@ export default async function handler(req, res) {
                 console.log('🔀 [MediaFlow] Using ENV configuration for RD sharing');
             }
 
-            // Estrae tipo e id dalle posizioni corrette
-            const type = pathParts[3];
-            const idWithSuffix = pathParts[4] || '';
             const id = idWithSuffix.replace(/\.json$/, '');
 
-            if (!type || !id || id.includes('config=')) { // Aggiunto controllo per evitare ID errati
+            if (!type || !id || id.includes('config=')) {
                 res.setHeader('Content-Type', 'application/json');
                 return res.status(400).send(JSON.stringify({ streams: [], error: 'Invalid stream path' }));
             }
