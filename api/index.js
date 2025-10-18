@@ -1503,7 +1503,7 @@ function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
     try {
         // MediaFlow Proxy format: {mediaflow_url}/proxy/stream?d={base64_encoded_direct_url}&api_password={password}
         const encodedUrl = btoa(directUrl);
-        const mediaflowUrl = mediaflowConfig.url.replace(/\/$/, ''); // Remove trailing slash
+        const mediaflowUrl = mediaflowConfig.url.replace(/\/+$/, ''); // Remove all trailing slashes
         const password = mediaflowConfig.password || '';
         
         // MediaFlow Proxy uses 'api_password' parameter for authentication
@@ -2921,9 +2921,24 @@ export default async function handler(req, res) {
                         }
 
                         const unrestricted = await realdebrid.unrestrictLink(downloadLink);
-                        console.log(`🚀 Redirecting directly to stream: ${unrestricted.download}`);
+                        let finalStreamUrl = unrestricted.download;
                         
-                        res.setHeader('Location', unrestricted.download);
+                        // Apply MediaFlow proxy if configured
+                        if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
+                            try {
+                                finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
+                                    url: userConfig.mediaflow_url,
+                                    password: userConfig.mediaflow_password
+                                });
+                                console.log(`🔒 Applied MediaFlow proxy to non-cached RD stream`);
+                            } catch (mfError) {
+                                console.error(`⚠️ Failed to apply MediaFlow proxy: ${mfError.message}`);
+                                // Fallback to direct URL if MediaFlow fails
+                            }
+                        }
+                        
+                        console.log(`🚀 Redirecting directly to stream: ${finalStreamUrl}`);
+                        res.setHeader('Location', finalStreamUrl);
                         return res.status(302).end();
 
                     } catch (redirectError) {
@@ -3156,8 +3171,24 @@ export default async function handler(req, res) {
                     }
 
                     const unrestricted = await realdebrid.unrestrictLink(downloadLink);
+                    
+                    let finalStreamUrl = unrestricted.download;
+                    
+                    // Apply MediaFlow proxy if configured
+                    if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
+                        try {
+                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
+                                url: userConfig.mediaflow_url,
+                                password: userConfig.mediaflow_password
+                            });
+                            console.log(`🔒 Applied MediaFlow proxy to non-cached RD stream (status check)`);
+                        } catch (mfError) {
+                            console.error(`⚠️ Failed to apply MediaFlow proxy: ${mfError.message}`);
+                            // Fallback to direct URL if MediaFlow fails
+                        }
+                    }
 
-                    return res.status(200).send(JSON.stringify({ status: 'ready', url: unrestricted.download }));
+                    return res.status(200).send(JSON.stringify({ status: 'ready', url: finalStreamUrl }));
                 }
 
                 if (['queued', 'downloading', 'magnet_conversion', 'waiting_files_selection'].includes(torrentInfo.status)) {
