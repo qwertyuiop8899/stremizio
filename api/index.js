@@ -3572,81 +3572,45 @@ export default async function handler(req, res) {
 
                 const torbox = new Torbox(userConfig.torbox_key);
                 
-                // ✅ APPROACH: Check if torrent already exists first
-                console.log(`📦 🔍 Checking for existing torrent: ${infoHash}`);
-                const userTorrents = await torbox.getTorrents();
-                let existingTorrent = userTorrents.find(t => t.hash?.toLowerCase() === infoHash.toLowerCase());
+                // Just add and stream (like RD - Torbox uses cache automatically)
+                console.log(`Adding torrent: ${infoHash}`);
                 
-                let torrentId;
+                const addResponse = await torbox.addTorrent(magnetLink);
+                const torrentId = addResponse.torrent_id || addResponse.id;
+                if (!torrentId) throw new Error('Impossibile ottenere l\'ID del torrent da Torbox.');
                 
-                if (existingTorrent) {
-                    console.log(`📦 ✅ Found existing torrent: ${existingTorrent.id}, status: ${existingTorrent.download_finished ? 'completed' : 'downloading'}`);
-                    torrentId = existingTorrent.id;
+                // Wait a bit for Torbox to process
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // Get torrent info
+                const torrentInfo = await torbox.getTorrentInfo(torrentId);
+                
+                // If already downloaded (was cached), stream immediately
+                if (torrentInfo.download_finished === true) {
+                    console.log(`Torrent ready (cached)`);
                     
-                    // If already completed, stream immediately
-                    if (existingTorrent.download_finished === true) {
-                        console.log(`📦 ⚡ Torrent ready (personal cache)`);
-                        const torrentInfo = await torbox.getTorrentInfo(torrentId);
-                        
-                        const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
-                        const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
-                        
-                        const videoFiles = (torrentInfo.files || []).filter(file => {
-                            const lowerName = file.name?.toLowerCase() || '';
-                            return videoExtensions.some(ext => lowerName.endsWith(ext)) &&
-                                   !junkKeywords.some(junk => lowerName.includes(junk));
-                        });
-                        
-                        const bestFile = videoFiles.length > 0
-                            ? videoFiles.reduce((max, f) => (f.size > max.size ? f : max), videoFiles[0])
-                            : (torrentInfo.files || [])[0];
-                        
-                        if (!bestFile) throw new Error('Nessun file valido trovato');
-                        
-                        const downloadData = await torbox.createDownload(torrentId, bestFile.id);
-                        console.log(`📦 � Redirecting to stream`);
-                        return res.redirect(302, downloadData);
-                    }
-                } else {
-                    // Not in personal torrents - add it (Torbox will use cache if available)
-                    console.log(`📦 📥 Adding new torrent: ${infoHash}`);
-                    const addResponse = await torbox.addTorrent(magnetLink);
-                    torrentId = addResponse.torrent_id || addResponse.id;
-                    if (!torrentId) throw new Error('Impossibile ottenere l\'ID del torrent da Torbox.');
+                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
+                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
                     
-                    // Wait a bit for Torbox to process
-                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    const videoFiles = (torrentInfo.files || []).filter(file => {
+                        const lowerName = file.name?.toLowerCase() || '';
+                        return videoExtensions.some(ext => lowerName.endsWith(ext)) &&
+                               !junkKeywords.some(junk => lowerName.includes(junk));
+                    });
                     
-                    // Get torrent info
-                    const torrentInfo = await torbox.getTorrentInfo(torrentId);
+                    const bestFile = videoFiles.length > 0
+                        ? videoFiles.reduce((max, f) => (f.size > max.size ? f : max), videoFiles[0])
+                        : (torrentInfo.files || [])[0];
                     
-                    // If already downloaded (was cached), stream immediately
-                    if (torrentInfo.download_finished === true) {
-                        console.log(`📦 ⚡ Torrent ready (global cache - instant)`);
-                        
-                        const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
-                        const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
-                        
-                        const videoFiles = (torrentInfo.files || []).filter(file => {
-                            const lowerName = file.name?.toLowerCase() || '';
-                            return videoExtensions.some(ext => lowerName.endsWith(ext)) &&
-                                   !junkKeywords.some(junk => lowerName.includes(junk));
-                        });
-                        
-                        const bestFile = videoFiles.length > 0
-                            ? videoFiles.reduce((max, f) => (f.size > max.size ? f : max), videoFiles[0])
-                            : (torrentInfo.files || [])[0];
-                        
-                        if (!bestFile) throw new Error('Nessun file valido trovato');
-                        
-                        const downloadData = await torbox.createDownload(torrentId, bestFile.id);
-                        console.log(`📦 🚀 Redirecting to stream`);
-                        return res.redirect(302, downloadData);
-                    }
+                    if (!bestFile) throw new Error('Nessun file valido trovato');
+                    
+                    const downloadData = await torbox.createDownload(torrentId, bestFile.id);
+                    console.log(`Redirecting to stream`);
+                    return res.redirect(302, downloadData);
                 }
                 
-                // Torrent downloading - show polling page
-                console.log(`📦 ⏳ Torrent downloading (ID: ${torrentId})`);
+                // Not cached - show polling page
+                console.log(`Torrent downloading (ID: ${torrentId})`);
                 const pollingHtml = `
                 <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Download in corso</title>
                 <style>body{font-family:sans-serif;background-color:#1E1E1E;color:#E0E0E0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;padding:1em;} .container{max-width:90%;padding:2em;background-color:#2A2A2A;border-radius:8px;box-shadow:0 4px 8px rgba(0,0,0,0.3);} h1{color:#4EC9B0;} .spinner{margin:1em auto;border:4px solid #3A3A3A;border-top:4px solid #4EC9B0;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite;} @keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}</style>
