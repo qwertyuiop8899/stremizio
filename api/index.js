@@ -2919,13 +2919,16 @@ export default async function handler(req, res) {
                 if (!torrent) {
                     console.log(`🔵 🔍 Checking RD GLOBAL cache for: ${infoHash}`);
                     try {
-                        const instantAvailability = await realdebrid.checkInstantAvailability([infoHash]);
-                        if (instantAvailability && instantAvailability[infoHash]) {
-                            const variants = Object.values(instantAvailability[infoHash].rd || {});
-                            if (variants.length > 0 && variants[0].length > 0) {
-                                globalCacheData = { cached: true, fileIds: variants[0].map(f => f.id) };
-                                console.log(`🔵 ⚡ Found in RD GLOBAL cache!`);
-                            }
+                        const cacheCheck = await realdebrid.checkCache([infoHash]);
+                        const cacheInfo = cacheCheck[infoHash.toLowerCase()];
+                        if (cacheInfo && cacheInfo.cached === true && cacheInfo.downloadLink) {
+                            globalCacheData = { 
+                                cached: true, 
+                                downloadLink: cacheInfo.downloadLink 
+                            };
+                            console.log(`🔵 ⚡ Found in RD GLOBAL cache!`);
+                        } else {
+                            console.log(`🔵 ❌ NOT in RD GLOBAL cache`);
                         }
                     } catch (e) {
                         console.error(`⚠️ Error checking RD global cache: ${e.message}`);
@@ -2976,41 +2979,12 @@ export default async function handler(req, res) {
                     return res.redirect(302, finalStreamUrl);
                 }
 
-                // ✅ If cached GLOBALLY, add and stream immediately
-                if (globalCacheData && globalCacheData.cached) {
-                    console.log(`🔵 ⚡ RD GLOBAL cache - adding and streaming: ${infoHash}`);
+                // ✅ If cached GLOBALLY, unrestrict and stream immediately
+                if (globalCacheData && globalCacheData.cached && globalCacheData.downloadLink) {
+                    console.log(`🔵 ⚡ RD GLOBAL cache - streaming immediately: ${infoHash}`);
                     
-                    // Add magnet to RD
-                    const addResponse = await realdebrid.addMagnet(magnetLink);
-                    const torrentId = addResponse.id;
-                    
-                    // Select files
-                    await realdebrid.selectFiles(torrentId, globalCacheData.fileIds.join(','));
-                    
-                    // Get torrent info
-                    const torrentInfo = await realdebrid.getTorrentInfo(torrentId);
-                    
-                    // Find main video file
-                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'];
-                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
-                    
-                    const selectedVideoFiles = torrentInfo.files.filter(file => 
-                        file.selected === 1 && 
-                        videoExtensions.some(ext => file.path.toLowerCase().endsWith(ext)) && 
-                        !junkKeywords.some(junk => file.path.toLowerCase().includes(junk))
-                    );
-                    
-                    let mainFile = selectedVideoFiles.length > 0 
-                        ? selectedVideoFiles.reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null)
-                        : torrentInfo.files.filter(f => f.selected === 1).reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null);
-                    
-                    if (!mainFile) throw new Error('Nessun file valido trovato nel torrent cached.');
-                    
-                    const filename = mainFile.path.split('/').pop();
-                    let downloadLink = torrentInfo.links.find(link => decodeURIComponent(link).endsWith(filename));
-                    if (!downloadLink) throw new Error(`Could not match filename "${filename}" to any links.`);
-                    
-                    const unrestricted = await realdebrid.unrestrictLink(downloadLink);
+                    // Unrestrict the cached link directly (no need to add magnet)
+                    const unrestricted = await realdebrid.unrestrictLink(globalCacheData.downloadLink);
                     let finalStreamUrl = unrestricted.download;
                     
                     // Apply MediaFlow proxy if configured
@@ -3602,9 +3576,15 @@ export default async function handler(req, res) {
                     console.log(`📦 🔍 Checking Torbox GLOBAL cache for: ${infoHash}`);
                     try {
                         const cacheCheck = await torbox.checkCache([infoHash]);
-                        if (cacheCheck && cacheCheck[infoHash] && cacheCheck[infoHash].length > 0) {
-                            globalCacheData = { cached: true };
+                        const cacheInfo = cacheCheck[infoHash.toLowerCase()];
+                        if (cacheInfo && cacheInfo.cached === true) {
+                            globalCacheData = { 
+                                cached: true,
+                                torboxData: cacheInfo.torboxData 
+                            };
                             console.log(`📦 ⚡ Found in Torbox GLOBAL cache!`);
+                        } else {
+                            console.log(`📦 ❌ NOT in Torbox GLOBAL cache`);
                         }
                     } catch (e) {
                         console.error(`⚠️ Error checking Torbox global cache: ${e.message}`);
