@@ -120,18 +120,54 @@
         <div class="description">
             <h4>Caratteristiche principali:</h4>
             <ul>
-                <li><strong>Multi-sorgente:</strong> Cerca su Il Corsaro Nero, UIndex e Knaben per la massima copertura.</li>
-                <li><strong>Ottimizzato per l'Italia:</strong> Dà priorità ai contenuti in lingua italiana.</li>
-                <li><strong>Supporto Real-Debrid:</strong> Abilita lo streaming istantaneo e sicuro, senza usare P2P.</li>
-                <li><strong>Attenzione:</strong> In mancanza del token di Real-Debrid verrà usato lo streaming P2P.</li>
-                <li><strong>Ordinamento Intelligente:</strong> I risultati sono ordinati per qualità, lingua e popolarità.</li>
+                <li><strong>Multi-sorgente:</strong> Il Corsaro Nero, UIndex, Knaben e Jackettio (opzionale).</li>
+                <li><strong>Ottimizzato per l'Italia:</strong> Priorità ai contenuti in italiano 🇮🇹</li>
+                <li><strong>Debrid:</strong> Real-Debrid e/o Torbox per streaming istantaneo.</li>
+                <li><strong>MediaFlow Proxy:</strong> Condividi Real-Debrid in sicurezza (opzionale).</li>
+                <li><strong>P2P Fallback:</strong> Senza debrid usa streaming P2P diretto.</li>
             </ul>
         </div>
-        <p>Per iniziare, inserisci la tua TMDB API Key (obbligatoria) e la tua Real-Debrid Key (opzionale).</p>
+        <p>Configura i servizi che vuoi utilizzare:</p>
         <div id="status"></div>
+        
+        <!-- TMDB (obbligatorio) -->
+        <h3 style="color: var(--primary-color); margin-bottom: 10px;">🎬 TMDB (Obbligatorio)</h3>
         <input id="tmdb_key" placeholder="TMDB API Key" type="text" autocomplete="off">
-        <input id="rd_key" placeholder="Real-Debrid Key (opzionale)" type="password">
-        <div class="button-group">
+        
+        <!-- Real-Debrid -->
+        <h3 style="color: var(--primary-color); margin-bottom: 10px; margin-top: 25px;">🔵 Real-Debrid (Opzionale)</h3>
+        <label style="display: flex; align-items: center; margin-bottom: 10px; cursor: pointer;">
+            <input type="checkbox" id="use_rd" style="width: auto; margin-right: 10px;">
+            <span>Abilita Real-Debrid</span>
+        </label>
+        <input id="rd_key" placeholder="Real-Debrid API Key" type="password" disabled>
+        
+        <!-- Torbox -->
+        <h3 style="color: var(--primary-color); margin-bottom: 10px; margin-top: 25px;">📦 Torbox (Opzionale)</h3>
+        <label style="display: flex; align-items: center; margin-bottom: 10px; cursor: pointer;">
+            <input type="checkbox" id="use_torbox" style="width: auto; margin-right: 10px;">
+            <span>Abilita Torbox</span>
+        </label>
+        <input id="torbox_key" placeholder="Torbox API Key" type="password" disabled>
+        
+        <!-- MediaFlow Proxy -->
+        <h3 style="color: var(--primary-color); margin-bottom: 10px; margin-top: 25px;">🔀 MediaFlow Proxy (Opzionale - Solo per RD)</h3>
+        <p style="font-size: 0.9em; color: var(--text-muted-color); margin-bottom: 10px;">
+            Per condividere Real-Debrid tra più utenti
+        </p>
+        <input id="mediaflow_url" placeholder="MediaFlow URL (es: https://your-mfp.com)" type="text">
+        <input id="mediaflow_password" placeholder="MediaFlow Password" type="password">
+        
+        <!-- Jackettio -->
+        <h3 style="color: var(--primary-color); margin-bottom: 10px; margin-top: 25px;">🔍 Jackettio (Opzionale - Solo Italiani)</h3>
+        <p style="font-size: 0.9em; color: var(--text-muted-color); margin-bottom: 10px;">
+            Cerca su indexer configurati (solo risultati italiani 🇮🇹)
+        </p>
+        <input id="jackett_url" placeholder="Jackett URL (es: https://jackett.your-domain.com)" type="text">
+        <input id="jackett_api_key" placeholder="Jackett API Key" type="password">
+        <input id="jackett_password" placeholder="Jackett Password (opzionale)" type="password">
+        
+        <div class="button-group" style="margin-top: 30px;">
             <button id="install_button" disabled>Installa Addon</button>
             <button id="copy_button" disabled>Copia Link</button>
         </div>
@@ -140,49 +176,131 @@
             <textarea id="install_link_display" rows="3" readonly></textarea>
         </div>
         <div class="links">
-            <a href="https://www.themoviedb.org/settings/api" target="_blank">Ottieni TMDB API Key</a> | 
-            <a href="https://real-debrid.com/apitoken" target="_blank">Ottieni Real-Debrid API Key</a>
+            <a href="https://www.themoviedb.org/settings/api" target="_blank">Ottieni TMDB Key</a> | 
+            <a href="https://real-debrid.com/apitoken" target="_blank">Real-Debrid Key</a> | 
+            <a href="https://torbox.app/settings" target="_blank">Torbox Key</a>
         </div>
     </div>
     <script>
+        // Input fields
         const tmdbKeyInput = document.getElementById("tmdb_key");
+        const useRdCheckbox = document.getElementById("use_rd");
         const rdKeyInput = document.getElementById("rd_key");
+        const useTorboxCheckbox = document.getElementById("use_torbox");
+        const torboxKeyInput = document.getElementById("torbox_key");
+        const mediaflowUrlInput = document.getElementById("mediaflow_url");
+        const mediaflowPasswordInput = document.getElementById("mediaflow_password");
+        const jackettUrlInput = document.getElementById("jackett_url");
+        const jackettApiKeyInput = document.getElementById("jackett_api_key");
+        const jackettPasswordInput = document.getElementById("jackett_password");
+        
+        // Buttons
         const installButton = document.getElementById("install_button");
         const copyButton = document.getElementById("copy_button");
         const statusEl = document.getElementById("status");
         const linkContainer = document.getElementById("link-container");
         const installLinkDisplay = document.getElementById("install_link_display");
 
+        // Enable/disable RD input based on checkbox
+        useRdCheckbox.addEventListener('change', () => {
+            rdKeyInput.disabled = !useRdCheckbox.checked;
+            if (!useRdCheckbox.checked) rdKeyInput.value = '';
+            updateInstallLink();
+        });
+
+        // Enable/disable Torbox input based on checkbox
+        useTorboxCheckbox.addEventListener('change', () => {
+            torboxKeyInput.disabled = !useTorboxCheckbox.checked;
+            if (!useTorboxCheckbox.checked) torboxKeyInput.value = '';
+            updateInstallLink();
+        });
+
         function updateInstallLink() {
             const tmdbKey = tmdbKeyInput.value.trim();
-            const rdKey = rdKeyInput.value.trim();
-
-            if (tmdbKey) {
-                const config = { tmdb_key: tmdbKey };
-                if (rdKey) config.rd_key = rdKey;
-                
-                const encodedConfig = btoa(JSON.stringify(config));
-                const installUrl = `stremio://${window.location.host}/${encodedConfig}/manifest.json`;
-                
-                installLinkDisplay.value = installUrl;
-                linkContainer.style.display = "block";
-                installButton.disabled = false;
-                copyButton.disabled = false;
-                statusEl.textContent = "✓ Configurazione pronta!";
-                statusEl.style.color = 'var(--success-color)';
-                tmdbKeyInput.style.borderColor = 'var(--success-color)';
-            } else {
+            
+            if (!tmdbKey) {
                 linkContainer.style.display = "none";
                 installButton.disabled = true;
                 copyButton.disabled = true;
-                statusEl.textContent = "Inserisci la TMDB API Key per continuare";
+                statusEl.textContent = "⚠️ Inserisci la TMDB API Key per continuare";
                 statusEl.style.color = 'var(--error-color)';
                 tmdbKeyInput.style.borderColor = 'var(--error-color)';
+                return;
             }
+
+            // Build config object
+            const config = { tmdb_key: tmdbKey };
+            
+            // Real-Debrid
+            if (useRdCheckbox.checked) {
+                const rdKey = rdKeyInput.value.trim();
+                if (rdKey) {
+                    config.use_rd = true;
+                    config.rd_key = rdKey;
+                }
+            }
+            
+            // Torbox
+            if (useTorboxCheckbox.checked) {
+                const torboxKey = torboxKeyInput.value.trim();
+                if (torboxKey) {
+                    config.use_torbox = true;
+                    config.torbox_key = torboxKey;
+                }
+            }
+            
+            // MediaFlow Proxy
+            const mediaflowUrl = mediaflowUrlInput.value.trim();
+            const mediaflowPassword = mediaflowPasswordInput.value.trim();
+            if (mediaflowUrl && mediaflowPassword) {
+                config.mediaflow_url = mediaflowUrl;
+                config.mediaflow_password = mediaflowPassword;
+            }
+            
+            // Jackettio
+            const jackettUrl = jackettUrlInput.value.trim();
+            const jackettApiKey = jackettApiKeyInput.value.trim();
+            if (jackettUrl && jackettApiKey) {
+                config.jackett_url = jackettUrl;
+                config.jackett_api_key = jackettApiKey;
+                
+                const jackettPassword = jackettPasswordInput.value.trim();
+                if (jackettPassword) {
+                    config.jackett_password = jackettPassword;
+                }
+            }
+            
+            // Generate install URL
+            const encodedConfig = btoa(JSON.stringify(config));
+            const installUrl = `stremio://${window.location.host}/${encodedConfig}/manifest.json`;
+            
+            installLinkDisplay.value = installUrl;
+            linkContainer.style.display = "block";
+            installButton.disabled = false;
+            copyButton.disabled = false;
+            
+            // Status message
+            let services = [];
+            if (config.use_rd) services.push("Real-Debrid");
+            if (config.use_torbox) services.push("Torbox");
+            if (config.mediaflow_url) services.push("MediaFlow");
+            if (config.jackett_url) services.push("Jackettio");
+            
+            const serviceText = services.length > 0 ? ` (${services.join(', ')})` : ' (Solo P2P)';
+            statusEl.textContent = `✓ Configurazione pronta${serviceText}`;
+            statusEl.style.color = 'var(--success-color)';
+            tmdbKeyInput.style.borderColor = 'var(--success-color)';
         }
 
+        // Event listeners for all inputs
         tmdbKeyInput.addEventListener('input', updateInstallLink);
         rdKeyInput.addEventListener('input', updateInstallLink);
+        torboxKeyInput.addEventListener('input', updateInstallLink);
+        mediaflowUrlInput.addEventListener('input', updateInstallLink);
+        mediaflowPasswordInput.addEventListener('input', updateInstallLink);
+        jackettUrlInput.addEventListener('input', updateInstallLink);
+        jackettApiKeyInput.addEventListener('input', updateInstallLink);
+        jackettPasswordInput.addEventListener('input', updateInstallLink);
 
         installButton.addEventListener('click', () => {
             if (installLinkDisplay.value) window.location.href = installLinkDisplay.value;
@@ -196,7 +314,7 @@
                     copyButton.textContent = "Copiato!";
                     setTimeout(() => {
                         copyButton.textContent = originalText;
-                        statusEl.textContent = "✓ Configurazione pronta!";
+                        updateInstallLink(); // Restore status
                     }, 2000);
                 });
             }
