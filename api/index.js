@@ -1543,38 +1543,28 @@ function createDebridServices(config) {
 }
 
 // ✅ MediaFlow Proxy Helper - Using /generate_urls endpoint for proper IP masking
-function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
+function proxyThroughMediaFlow(directUrl, mediaflowConfig, workerOrigin) {
     if (!mediaflowConfig || !mediaflowConfig.url) {
         return directUrl; // No proxy configured, return direct URL
     }
     
     try {
-        const mediaflowUrl = mediaflowConfig.url.replace(/\/+$/, ''); // Remove all trailing slashes
-        const password = mediaflowConfig.password || '';
+        // Instead of returning MediaFlow URL directly, return OUR endpoint
+        // which will proxy through MediaFlow server-side
+        // This ensures MediaFlow IP is used, not client IP
         
-        // Extract filename from URL for better logging/tracking
-        const filename = directUrl.split('/').pop() || 'stream.mkv';
+        const encodedRdUrl = encodeURIComponent(directUrl);
+        const encodedMfUrl = encodeURIComponent(mediaflowConfig.url.replace(/\/+$/, ''));
+        const encodedMfPass = encodeURIComponent(mediaflowConfig.password || '');
         
-        // Build MediaFlow proxy URL with direct proxying (not generate_urls)
-        // Format: /proxy/hls/manifest.m3u8?d=<destination>&api_password=<password>
-        // For direct streaming: /proxy/stream/filename.mkv?d=<destination>&api_password=<password>
+        // Return URL to OUR server endpoint that will handle MediaFlow proxying
+        const proxiedUrl = `${workerOrigin}/mediaflow-proxy/?rd_url=${encodedRdUrl}&mf_url=${encodedMfUrl}&mf_pass=${encodedMfPass}`;
         
-        const encodedDestination = encodeURIComponent(directUrl);
-        const proxyPath = `/proxy/stream/${encodeURIComponent(filename)}`;
-        
-        // Build query parameters
-        const params = new URLSearchParams({
-            'd': directUrl,
-            'api_password': password
-        });
-        
-        const proxiedUrl = `${mediaflowUrl}${proxyPath}?${params.toString()}`;
-        
-        console.log(`🔀 MediaFlow proxying enabled: ${filename}`);
+        console.log(`🔀 MediaFlow proxying through Vercel endpoint`);
         return proxiedUrl;
         
     } catch (error) {
-        console.error(`❌ MediaFlow proxy failed, using direct URL:`, error.message);
+        console.error(`❌ MediaFlow proxy setup failed, using direct URL:`, error.message);
         return directUrl;
     }
 }
@@ -2322,32 +2312,18 @@ async function handleStream(type, id, config, workerOrigin) {
                     let cacheType = 'none';
                     let streamError = null;
                     
+                    // ✅ UNIFIED ENDPOINT: Always use /rd-stream/ with magnet link
+                    // The endpoint will handle: global cache, personal cache, or add new torrent
+                    streamUrl = `${workerOrigin}/rd-stream/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
+                    
                     if (rdCacheData?.cached && rdCacheData.downloadLink) {
                         cacheType = 'global';
-                        try {
-                            console.log(`🔵 ⚡ Getting RD stream URL for GLOBAL cached: ${result.title}`);
-                            const unrestricted = await rdService.unrestrictLink(rdCacheData.downloadLink);
-                            let directUrl = unrestricted.download;
-                            
-                            // ✅ Proxy through MediaFlow if configured
-                            if (debridServices.mediaflowProxy) {
-                                streamUrl = proxyThroughMediaFlow(directUrl, debridServices.mediaflowProxy);
-                            } else {
-                                streamUrl = directUrl;
-                            }
-                        } catch (error) {
-                            console.error(`❌ RD unrestrict failed. Fallback to add. Error:`, error.message);
-                            cacheType = 'none';
-                            streamUrl = `${workerOrigin}/rd-add/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
-                            streamError = error.message;
-                        }
+                        console.log(`🔵 ⚡ RD GLOBAL cache available: ${result.title}`);
                     } else if (rdUserTorrent && rdUserTorrent.status === 'downloaded') {
                         cacheType = 'personal';
-                        streamUrl = `${workerOrigin}/rd-stream-personal/${encodedConfig}/${rdUserTorrent.id}`;
                         console.log(`🔵 👤 Found in RD PERSONAL cache: ${result.title}`);
                     } else {
                         cacheType = 'none';
-                        streamUrl = `${workerOrigin}/rd-add/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
                     }
                     
                     const isCached = cacheType === 'global' || cacheType === 'personal';
@@ -2412,17 +2388,18 @@ async function handleStream(type, id, config, workerOrigin) {
                     let cacheType = 'none';
                     let streamError = null;
                     
+                    // ✅ UNIFIED ENDPOINT: Always use /torbox-stream/ with magnet link
+                    // The endpoint will handle: global cache, personal cache, or add new torrent
+                    streamUrl = `${workerOrigin}/torbox-stream/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
+                    
                     if (torboxCacheData?.cached && torboxCacheData.downloadLink) {
                         cacheType = 'global';
-                        streamUrl = `${workerOrigin}/torbox-stream/${encodedConfig}/${encodeURIComponent(result.infoHash)}`;
                         console.log(`📦 ⚡ Torbox GLOBAL cache available: ${result.title}`);
                     } else if (torboxUserTorrent && torboxUserTorrent.download_finished === true) {
                         cacheType = 'personal';
-                        streamUrl = `${workerOrigin}/torbox-stream-personal/${encodedConfig}/${torboxUserTorrent.id}`;
                         console.log(`📦 👤 Found in Torbox PERSONAL cache: ${result.title}`);
                     } else {
                         cacheType = 'none';
-                        streamUrl = `${workerOrigin}/torbox-add/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
                     }
                     
                     const isCached = cacheType === 'global' || cacheType === 'personal';
@@ -2761,6 +2738,63 @@ export default async function handler(req, res) {
         }
     }
 
+    // ✅ MediaFlow Proxy Endpoint - Server-side proxying
+    if (url.pathname === '/mediaflow-proxy/') {
+        try {
+            const rd_url = url.searchParams.get('rd_url');
+            const mf_url = url.searchParams.get('mf_url');
+            const mf_pass = url.searchParams.get('mf_pass');
+            
+            if (!rd_url || !mf_url || !mf_pass) {
+                return res.status(400).send('Missing required parameters');
+            }
+            
+            // Extract filename from RD URL
+            const filename = rd_url.split('/').pop() || 'stream.mkv';
+            
+            // Build MediaFlow proxy URL
+            const mediaflowUrl = decodeURIComponent(mf_url).replace(/\/+$/, '');
+            const password = decodeURIComponent(mf_pass);
+            
+            const params = new URLSearchParams({
+                'd': rd_url,
+                'api_password': password
+            });
+            
+            const mediaflowProxyUrl = `${mediaflowUrl}/proxy/stream/${encodeURIComponent(filename)}?${params.toString()}`;
+            
+            console.log(`🔀 Proxying through MediaFlow: ${filename}`);
+            
+            // Fetch from MediaFlow and stream the response
+            const mediaflowResponse = await fetch(mediaflowProxyUrl, {
+                headers: {
+                    'Range': req.headers['range'] || 'bytes=0-',
+                    'User-Agent': req.headers['user-agent'] || 'Stremio/4.0'
+                }
+            });
+            
+            // Copy response headers from MediaFlow
+            res.status(mediaflowResponse.status);
+            ['content-type', 'content-length', 'content-range', 'accept-ranges'].forEach(header => {
+                const value = mediaflowResponse.headers.get(header);
+                if (value) res.setHeader(header, value);
+            });
+            
+            // Stream the response body
+            const reader = mediaflowResponse.body.getReader();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                res.write(Buffer.from(value));
+            }
+            return res.end();
+            
+        } catch (error) {
+            console.error(`❌ MediaFlow proxy error:`, error.message);
+            return res.status(500).send(`MediaFlow proxy error: ${error.message}`);
+        }
+    }
+
     try {
         // Stremio manifest
         // Gestisce sia /manifest.json che /{config}/manifest.json
@@ -2840,11 +2874,104 @@ export default async function handler(req, res) {
             return res.status(200).send(JSON.stringify(result));
         }
         
+        // ✅ UNIFIED Real-Debrid Stream Endpoint
+        if (url.pathname.startsWith('/rd-stream/')) {
+            const pathParts = url.pathname.split('/');
+            const encodedConfigStr = pathParts[2];
+            const encodedMagnet = pathParts[3];
+            const workerOrigin = url.origin;
+            
+            const htmlResponse = (title, message, isError = false) => `
+                <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title>
+                <style>body{font-family:sans-serif;background-color:#1E1E1E;color:#E0E0E0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;padding:1em;} .container{max-width:90%;padding:2em;background-color:#2A2A2A;border-radius:8px;box-shadow:0 4px 8px rgba(0,0,0,0.3);} h1{color:${isError ? '#FF6B6B' : '#4EC9B0'};}</style>
+                </head><body><div class="container"><h1>${title}</h1><p>${message}</p></div></body></html>`;
+            
+            let userConfig = {};
+            res.setHeader('Content-Type', 'text/html');
+            try {
+                if (!encodedConfigStr) throw new Error("Configurazione mancante nell'URL.");
+                userConfig = JSON.parse(atob(encodedConfigStr));
+            } catch (e) {
+                return res.status(400).send(htmlResponse('Errore di Configurazione', `Impossibile leggere la configurazione dall'URL: ${e.message}`, true));
+            }
+
+            if (!userConfig.rd_key) {
+                return res.status(400).send(htmlResponse('Errore di Configurazione', 'La chiave API di Real-Debrid non è stata configurata.', true));
+            }
+
+            if (!encodedMagnet) {
+                return res.status(400).send(htmlResponse('Errore', 'Link magnet non valido.', true));
+            }
+
+            try {
+                const magnetLink = decodeURIComponent(encodedMagnet);
+                const infoHash = extractInfoHash(magnetLink);
+                if (!infoHash) throw new Error('Magnet link non valido o senza info hash.');
+
+                const realdebrid = new RealDebrid(userConfig.rd_key);
+                const userTorrents = await realdebrid.getTorrents();
+                let torrent = userTorrents.find(t => t.hash.toLowerCase() === infoHash.toLowerCase());
+
+                // ✅ If cached (globally or personally), stream immediately
+                if (torrent && torrent.status === 'downloaded') {
+                    console.log(`🔵 ⚡ RD cached - streaming immediately: ${infoHash}`);
+                    const torrentInfo = await realdebrid.getTorrentInfo(torrent.id);
+                    
+                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'];
+                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
+                    
+                    const selectedVideoFiles = torrentInfo.files.filter(file => 
+                        file.selected === 1 && 
+                        videoExtensions.some(ext => file.path.toLowerCase().endsWith(ext)) && 
+                        !junkKeywords.some(junk => file.path.toLowerCase().includes(junk))
+                    );
+                    
+                    let mainFile = selectedVideoFiles.length > 0 
+                        ? selectedVideoFiles.reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null)
+                        : torrentInfo.files.filter(f => f.selected === 1).reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null);
+                    
+                    if (!mainFile) throw new Error('Torrent completato ma nessun file valido risulta selezionato.');
+                    
+                    const filename = mainFile.path.split('/').pop();
+                    let downloadLink = torrentInfo.links.find(link => decodeURIComponent(link).endsWith(filename));
+                    if (!downloadLink) throw new Error(`Could not match filename "${filename}" to any of the available links.`);
+                    
+                    const unrestricted = await realdebrid.unrestrictLink(downloadLink);
+                    let finalStreamUrl = unrestricted.download;
+                    
+                    // Apply MediaFlow proxy if configured
+                    if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
+                        try {
+                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
+                                url: userConfig.mediaflow_url,
+                                password: userConfig.mediaflow_password
+                            }, workerOrigin);
+                            console.log(`🔒 Applied MediaFlow proxy to cached RD stream`);
+                        } catch (mfError) {
+                            console.error(`⚠️ Failed to apply MediaFlow proxy: ${mfError.message}`);
+                        }
+                    }
+                    
+                    console.log(`🔵 🚀 Redirecting to RD stream`);
+                    return res.redirect(302, finalStreamUrl);
+                }
+
+                // ✅ Not cached - redirect to /rd-add/ for polling
+                console.log(`🔵 📥 Not cached - adding torrent: ${infoHash}`);
+                return res.redirect(302, `/rd-add/${encodedConfigStr}/${encodeURIComponent(magnetLink)}`);
+
+            } catch (error) {
+                console.error('🔵 ❌ RD stream error:', error);
+                return res.status(500).send(htmlResponse('Errore', error.message, true));
+            }
+        }
+        
         // Endpoint to handle adding magnets to Real-Debrid for Android/Web compatibility
         if (url.pathname.startsWith('/rd-add/')) {
             const pathParts = url.pathname.split('/'); // e.g., ['', 'rd-add', 'config_string', 'magnet_link']
             const encodedConfigStr = pathParts[2];
             const encodedMagnet = pathParts[3];
+            const workerOrigin = url.origin; // For MediaFlow proxy URL generation
             
             const htmlResponse = (title, message, isError = false) => `
                 <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title>
@@ -2991,10 +3118,7 @@ export default async function handler(req, res) {
                         // Apply MediaFlow proxy if configured
                         if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
                             try {
-                                finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
-                                    url: userConfig.mediaflow_url,
-                                    password: userConfig.mediaflow_password
-                                });
+                                finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, { url: userConfig.mediaflow_url, password: userConfig.mediaflow_password }, workerOrigin);
                                 console.log(`🔒 Applied MediaFlow proxy to non-cached RD stream`);
                             } catch (mfError) {
                                 console.error(`⚠️ Failed to apply MediaFlow proxy: ${mfError.message}`);
@@ -3090,6 +3214,7 @@ export default async function handler(req, res) {
             const pathParts = url.pathname.split('/'); // e.g., ['', 'rd-stream-personal', 'config_string', 'torrent_id']
             const encodedConfigStr = pathParts[2];
             const torrentId = pathParts[3];
+            const workerOrigin = url.origin; // For MediaFlow proxy URL generation
 
             const htmlResponse = (title, message, isError = false) => `
                 <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title>
@@ -3169,7 +3294,7 @@ export default async function handler(req, res) {
                     url: userConfig.mediaflow_url,
                     password: userConfig.mediaflow_password
                 };
-                finalStreamUrl = proxyThroughMediaFlow(finalStreamUrl, mediaflowConfig);
+                finalStreamUrl = proxyThroughMediaFlow(finalStreamUrl, mediaflowConfig, workerOrigin);
             }
             
             console.log(`🚀 Redirecting to personal stream`);                res.setHeader('Location', finalStreamUrl);
@@ -3186,6 +3311,7 @@ export default async function handler(req, res) {
             const pathParts = url.pathname.split('/'); // e.g., ['', 'rd-status', 'config_string', 'torrent_id']
             const encodedConfigStr = pathParts[2];
             const torrentId = pathParts[3];
+            const workerOrigin = url.origin; // For MediaFlow proxy URL generation
 
             res.setHeader('Content-Type', 'application/json');
             let userConfig = {};
@@ -3240,10 +3366,7 @@ export default async function handler(req, res) {
                     // Apply MediaFlow proxy if configured
                     if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
                         try {
-                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
-                                url: userConfig.mediaflow_url,
-                                password: userConfig.mediaflow_password
-                            });
+                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, { url: userConfig.mediaflow_url, password: userConfig.mediaflow_password }, workerOrigin);
                             console.log(`🔒 Applied MediaFlow proxy to non-cached RD stream (status check)`);
                         } catch (mfError) {
                             console.error(`⚠️ Failed to apply MediaFlow proxy: ${mfError.message}`);
@@ -3365,49 +3488,69 @@ export default async function handler(req, res) {
         if (url.pathname.startsWith('/torbox-stream/')) {
             const pathParts = url.pathname.split('/');
             const encodedConfigStr = pathParts[2];
-            const encodedHash = pathParts[3];
+            const encodedMagnet = pathParts[3];
+            
+            const htmlResponse = (title, message, isError = false) => `
+                <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title>
+                <style>body{font-family:sans-serif;background-color:#1E1E1E;color:#E0E0E0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;padding:1em;} .container{max-width:90%;padding:2em;background-color:#2A2A2A;border-radius:8px;box-shadow:0 4px 8px rgba(0,0,0,0.3);} h1{color:${isError ? '#FF6B6B' : '#4EC9B0'};}</style>
+                </head><body><div class="container"><h1>${title}</h1><p>${message}</p></div></body></html>`;
             
             let userConfig = {};
             res.setHeader('Content-Type', 'text/html');
             try {
                 userConfig = JSON.parse(atob(encodedConfigStr));
             } catch (e) {
-                return res.status(400).send(`<h1>Errore Config</h1><p>${e.message}</p>`);
+                return res.status(400).send(htmlResponse('Errore Config', e.message, true));
             }
 
             if (!userConfig.torbox_key) {
-                return res.status(400).send('<h1>Errore</h1><p>Torbox API key non configurata.</p>');
+                return res.status(400).send(htmlResponse('Errore', 'Torbox API key non configurata.', true));
+            }
+
+            if (!encodedMagnet) {
+                return res.status(400).send(htmlResponse('Errore', 'Link magnet mancante.', true));
             }
 
             try {
-                const infoHash = decodeURIComponent(encodedHash);
-                const torbox = new Torbox(userConfig.torbox_key);
+                const magnetLink = decodeURIComponent(encodedMagnet);
+                const infoHash = extractInfoHash(magnetLink);
+                if (!infoHash) throw new Error('Magnet link non valido o senza info hash.');
 
+                const torbox = new Torbox(userConfig.torbox_key);
                 const userTorrents = await torbox.getTorrents();
                 let torrent = userTorrents.find(t => t.hash?.toLowerCase() === infoHash.toLowerCase());
 
+                // ✅ If cached (globally or personally), stream immediately
                 if (torrent && torrent.download_finished === true) {
+                    console.log(`📦 ⚡ Torbox cached - streaming immediately: ${infoHash}`);
                     const torrentInfo = await torbox.getTorrentInfo(torrent.id);
                     const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
-                    const videoFiles = (torrentInfo.files || []).filter(f => 
-                        videoExtensions.some(ext => f.name?.toLowerCase().endsWith(ext))
-                    );
+                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
+                    
+                    const videoFiles = (torrentInfo.files || []).filter(file => {
+                        const lowerName = file.name?.toLowerCase() || '';
+                        return videoExtensions.some(ext => lowerName.endsWith(ext)) &&
+                               !junkKeywords.some(junk => lowerName.includes(junk));
+                    });
+                    
                     const bestFile = videoFiles.length > 0
                         ? videoFiles.reduce((max, f) => (f.size > max.size ? f : max), videoFiles[0])
                         : (torrentInfo.files || [])[0];
                     
-                    if (!bestFile) throw new Error('No valid file found');
+                    if (!bestFile) throw new Error('Nessun file valido trovato');
                     
                     const downloadData = await torbox.createDownload(torrent.id, bestFile.id);
+                    console.log(`📦 🚀 Redirecting to Torbox stream`);
                     return res.redirect(302, downloadData);
                 }
 
-                const fakeMagnet = `magnet:?xt=urn:btih:${infoHash}`;
-                return res.redirect(302, `/torbox-add/${encodedConfigStr}/${encodeURIComponent(fakeMagnet)}`);
+                // ✅ Not cached - add torrent and show polling page (like /torbox-add/)
+                console.log(`📦 📥 Not cached - adding torrent: ${infoHash}`);
+                return res.redirect(302, `/torbox-add/${encodedConfigStr}/${encodeURIComponent(magnetLink)}`);
 
             } catch (error) {
                 console.error('📦 ❌ Torbox stream error:', error);
-                return res.status(500).send(`<h1>Errore</h1><p>${error.message}</p>`);
+                return res.status(500).send(htmlResponse('Errore', error.message, true));
             }
         }
 
