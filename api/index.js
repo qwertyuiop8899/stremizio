@@ -2910,40 +2910,50 @@ export default async function handler(req, res) {
 
                 const realdebrid = new RealDebrid(userConfig.rd_key);
                 
-                // ✅ CHECK 1: Check personal torrents first
-                const userTorrents = await realdebrid.getTorrents();
-                let torrent = userTorrents.find(t => t.hash.toLowerCase() === infoHash.toLowerCase());
-
-                // ✅ CHECK 2: If not in personal, check GLOBAL cache
-                let globalCacheData = null;
-                if (!torrent) {
-                    console.log(`🔵 🔍 Checking RD GLOBAL cache for: ${infoHash}`);
-                    try {
-                        const cacheCheck = await realdebrid.checkCache([infoHash]);
-                        const cacheInfo = cacheCheck[infoHash.toLowerCase()];
-                        if (cacheInfo && cacheInfo.cached === true && cacheInfo.downloadLink) {
-                            globalCacheData = { 
-                                cached: true, 
-                                downloadLink: cacheInfo.downloadLink 
-                            };
-                            console.log(`🔵 ⚡ Found in RD GLOBAL cache!`);
-                        } else {
-                            console.log(`🔵 ❌ NOT in RD GLOBAL cache`);
-                        }
-                    } catch (e) {
-                        console.error(`⚠️ Error checking RD global cache: ${e.message}`);
-                    }
+                // ✅ SIMPLE APPROACH: Just try to add the magnet and get the stream
+                // If it's cached (personal or global), RD will handle it automatically
+                console.log(`🔵 📥 Adding/getting torrent: ${infoHash}`);
+                
+                const addResponse = await realdebrid.addMagnet(magnetLink);
+                const torrentId = addResponse.id;
+                if (!torrentId) throw new Error('Impossibile ottenere l\'ID del torrent da Real-Debrid.');
+                
+                // Get torrent info
+                const torrentInfo = await realdebrid.getTorrentInfo(torrentId);
+                
+                // If files need selection, select the biggest video file
+                if (torrentInfo.status === 'waiting_files_selection') {
+                    console.log(`🔵 📂 Selecting files for torrent ${torrentId}`);
+                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'];
+                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
+                    
+                    const videoFiles = torrentInfo.files.filter(file => {
+                        const lowerPath = file.path.toLowerCase();
+                        return videoExtensions.some(ext => lowerPath.endsWith(ext)) &&
+                               !junkKeywords.some(junk => lowerPath.includes(junk));
+                    });
+                    
+                    const fileToDownload = videoFiles.length > 0
+                        ? videoFiles.reduce((max, file) => (file.bytes > max.bytes ? file : max), videoFiles[0])
+                        : torrentInfo.files.reduce((max, file) => (file.bytes > max.bytes ? file : max), torrentInfo.files[0]);
+                    
+                    if (!fileToDownload) throw new Error('Impossibile determinare il file da scaricare.');
+                    
+                    await realdebrid.selectFiles(torrentId, fileToDownload.id);
+                    console.log(`🔵 ✅ Selected file: ${fileToDownload.path}`);
                 }
-
-                // ✅ If cached PERSONALLY, stream immediately
-                if (torrent && torrent.status === 'downloaded') {
-                    console.log(`🔵 ⚡ RD PERSONAL cache - streaming immediately: ${infoHash}`);
-                    const torrentInfo = await realdebrid.getTorrentInfo(torrent.id);
+                
+                // Get updated torrent info after selection
+                const updatedInfo = await realdebrid.getTorrentInfo(torrentId);
+                
+                // If already downloaded (was cached), stream immediately
+                if (updatedInfo.status === 'downloaded') {
+                    console.log(`🔵 ⚡ Torrent ready (cached or just completed)`);
                     
                     const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'];
                     const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
                     
-                    const selectedVideoFiles = torrentInfo.files.filter(file => 
+                    const selectedVideoFiles = updatedInfo.files.filter(file => 
                         file.selected === 1 && 
                         videoExtensions.some(ext => file.path.toLowerCase().endsWith(ext)) && 
                         !junkKeywords.some(junk => file.path.toLowerCase().includes(junk))
@@ -2951,62 +2961,55 @@ export default async function handler(req, res) {
                     
                     let mainFile = selectedVideoFiles.length > 0 
                         ? selectedVideoFiles.reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null)
-                        : torrentInfo.files.filter(f => f.selected === 1).reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null);
+                        : updatedInfo.files.filter(f => f.selected === 1).reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null);
                     
-                    if (!mainFile) throw new Error('Torrent completato ma nessun file valido risulta selezionato.');
+                    if (!mainFile) throw new Error('Nessun file valido trovato.');
                     
                     const filename = mainFile.path.split('/').pop();
-                    let downloadLink = torrentInfo.links.find(link => decodeURIComponent(link).endsWith(filename));
-                    if (!downloadLink) throw new Error(`Could not match filename "${filename}" to any of the available links.`);
+                    let downloadLink = updatedInfo.links.find(link => decodeURIComponent(link).endsWith(filename));
+                    if (!downloadLink) downloadLink = updatedInfo.links[0]; // Fallback to first link
                     
                     const unrestricted = await realdebrid.unrestrictLink(downloadLink);
                     let finalStreamUrl = unrestricted.download;
                     
-                    // Apply MediaFlow proxy if configured
                     if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
                         try {
-                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
-                                url: userConfig.mediaflow_url,
-                                password: userConfig.mediaflow_password
-                            }, workerOrigin);
-                            console.log(`🔒 Applied MediaFlow proxy to cached RD stream`);
+                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, userConfig.mediaflow_url, userConfig.mediaflow_password, workerOrigin);
+                            console.log(`🔒 Applied MediaFlow proxy`);
                         } catch (mfError) {
-                            console.error(`⚠️ Failed to apply MediaFlow proxy: ${mfError.message}`);
+                            console.warn(`⚠️ MediaFlow proxy failed: ${mfError.message}`);
                         }
                     }
                     
-                    console.log(`🔵 🚀 Redirecting to RD PERSONAL stream`);
+                    console.log(`🔵 🚀 Redirecting to stream`);
                     return res.redirect(302, finalStreamUrl);
                 }
-
-                // ✅ If cached GLOBALLY, unrestrict and stream immediately
-                if (globalCacheData && globalCacheData.cached && globalCacheData.downloadLink) {
-                    console.log(`🔵 ⚡ RD GLOBAL cache - streaming immediately: ${infoHash}`);
-                    
-                    // Unrestrict the cached link directly (no need to add magnet)
-                    const unrestricted = await realdebrid.unrestrictLink(globalCacheData.downloadLink);
-                    let finalStreamUrl = unrestricted.download;
-                    
-                    // Apply MediaFlow proxy if configured
-                    if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
-                        try {
-                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
-                                url: userConfig.mediaflow_url,
-                                password: userConfig.mediaflow_password
-                            }, workerOrigin);
-                            console.log(`🔒 Applied MediaFlow proxy to GLOBAL cached RD stream`);
-                        } catch (mfError) {
-                            console.error(`⚠️ Failed to apply MediaFlow proxy: ${mfError.message}`);
+                
+                // Not cached - show polling page
+                console.log(`🔵 ⏳ Torrent downloading (status: ${updatedInfo.status})`);
+                const pollingHtml = `
+                <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Download in corso</title>
+                <style>body{font-family:sans-serif;background-color:#1E1E1E;color:#E0E0E0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;padding:1em;} .container{max-width:90%;padding:2em;background-color:#2A2A2A;border-radius:8px;box-shadow:0 4px 8px rgba(0,0,0,0.3);} h1{color:#4EC9B0;} .spinner{margin:1em auto;border:4px solid #3A3A3A;border-top:4px solid #4EC9B0;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite;} @keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}</style>
+                <script>
+                    let attempts = 0;
+                    function checkStatus() {
+                        attempts++;
+                        if (attempts > 60) {
+                            document.body.innerHTML = '<div class="container"><h1 style="color:#FF6B6B;">Timeout</h1><p>Download richiede troppo tempo. Riprova più tardi.</p></div>';
+                            return;
                         }
+                        fetch(window.location.href, {method: 'HEAD', redirect: 'manual'})
+                            .then(r => {
+                                if (r.type === 'opaqueredirect' || r.status === 302) window.location.reload();
+                                else setTimeout(checkStatus, 3000);
+                            })
+                            .catch(() => setTimeout(checkStatus, 3000));
                     }
-                    
-                    console.log(`🔵 🚀 Redirecting to RD GLOBAL cache stream`);
-                    return res.redirect(302, finalStreamUrl);
-                }
-
-                // ✅ Not cached - redirect to /rd-add/ for polling
-                console.log(`🔵 📥 Not cached - adding torrent: ${infoHash}`);
-                return res.redirect(302, `/rd-add/${encodedConfigStr}/${encodeURIComponent(magnetLink)}`);
+                    setTimeout(checkStatus, 3000);
+                </script>
+                </head><body><div class="container"><h1>Download in corso su Real-Debrid</h1><div class="spinner"></div><p>Il torrent non è in cache e viene scaricato ora.<br>La pagina si aggiornerà automaticamente quando pronto.</p></div></body></html>`;
+                
+                return res.status(200).send(pollingHtml);
 
             } catch (error) {
                 console.error('🔵 ❌ RD stream error:', error);
@@ -3566,35 +3569,24 @@ export default async function handler(req, res) {
 
                 const torbox = new Torbox(userConfig.torbox_key);
                 
-                // ✅ CHECK 1: Check personal torrents first
-                const userTorrents = await torbox.getTorrents();
-                let torrent = userTorrents.find(t => t.hash?.toLowerCase() === infoHash.toLowerCase());
-
-                // ✅ CHECK 2: If not in personal, check GLOBAL cache
-                let globalCacheData = null;
-                if (!torrent) {
-                    console.log(`📦 🔍 Checking Torbox GLOBAL cache for: ${infoHash}`);
-                    try {
-                        const cacheCheck = await torbox.checkCache([infoHash]);
-                        const cacheInfo = cacheCheck[infoHash.toLowerCase()];
-                        if (cacheInfo && cacheInfo.cached === true) {
-                            globalCacheData = { 
-                                cached: true,
-                                torboxData: cacheInfo.torboxData 
-                            };
-                            console.log(`📦 ⚡ Found in Torbox GLOBAL cache!`);
-                        } else {
-                            console.log(`📦 ❌ NOT in Torbox GLOBAL cache`);
-                        }
-                    } catch (e) {
-                        console.error(`⚠️ Error checking Torbox global cache: ${e.message}`);
-                    }
-                }
-
-                // ✅ If cached PERSONALLY, stream immediately
-                if (torrent && torrent.download_finished === true) {
-                    console.log(`📦 ⚡ Torbox PERSONAL cache - streaming immediately: ${infoHash}`);
-                    const torrentInfo = await torbox.getTorrentInfo(torrent.id);
+                // ✅ SIMPLE APPROACH: Just try to add and get the stream
+                // If it's cached, Torbox will handle it automatically
+                console.log(`📦 📥 Adding/getting torrent: ${infoHash}`);
+                
+                const addResponse = await torbox.addTorrent(magnetLink);
+                const torrentId = addResponse.torrent_id || addResponse.id;
+                if (!torrentId) throw new Error('Impossibile ottenere l\'ID del torrent da Torbox.');
+                
+                // Wait a bit for Torbox to process
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // Get torrent info
+                const torrentInfo = await torbox.getTorrentInfo(torrentId);
+                
+                // If already downloaded (was cached), stream immediately
+                if (torrentInfo.download_finished === true) {
+                    console.log(`📦 ⚡ Torrent ready (cached or just completed)`);
+                    
                     const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
                     const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
                     
@@ -3610,49 +3602,36 @@ export default async function handler(req, res) {
                     
                     if (!bestFile) throw new Error('Nessun file valido trovato');
                     
-                    const downloadData = await torbox.createDownload(torrent.id, bestFile.id);
-                    console.log(`📦 🚀 Redirecting to Torbox PERSONAL stream`);
-                    return res.redirect(302, downloadData);
-                }
-
-                // ✅ If cached GLOBALLY, add and stream immediately
-                if (globalCacheData && globalCacheData.cached) {
-                    console.log(`📦 ⚡ Torbox GLOBAL cache - adding and streaming: ${infoHash}`);
-                    
-                    // Add magnet to Torbox
-                    const addResponse = await torbox.addMagnet(magnetLink);
-                    const torrentId = addResponse.torrent_id;
-                    
-                    // Wait a moment for Torbox to process
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    
-                    // Get torrent info
-                    const torrentInfo = await torbox.getTorrentInfo(torrentId);
-                    
-                    // Find main video file
-                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
-                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
-                    
-                    const videoFiles = (torrentInfo.files || []).filter(file => {
-                        const lowerName = file.name?.toLowerCase() || '';
-                        return videoExtensions.some(ext => lowerName.endsWith(ext)) &&
-                               !junkKeywords.some(junk => lowerName.includes(junk));
-                    });
-                    
-                    const bestFile = videoFiles.length > 0
-                        ? videoFiles.reduce((max, f) => (f.size > max.size ? f : max), videoFiles[0])
-                        : (torrentInfo.files || [])[0];
-                    
-                    if (!bestFile) throw new Error('Nessun file valido trovato nel torrent cached');
-                    
                     const downloadData = await torbox.createDownload(torrentId, bestFile.id);
-                    console.log(`📦 🚀 Redirecting to Torbox GLOBAL cache stream`);
+                    console.log(`📦 🚀 Redirecting to stream`);
                     return res.redirect(302, downloadData);
                 }
-
-                // ✅ Not cached - add torrent and show polling page (like /torbox-add/)
-                console.log(`📦 📥 Not cached - adding torrent: ${infoHash}`);
-                return res.redirect(302, `/torbox-add/${encodedConfigStr}/${encodeURIComponent(magnetLink)}`);
+                
+                // Not cached - show polling page
+                console.log(`📦 ⏳ Torrent downloading`);
+                const pollingHtml = `
+                <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Download in corso</title>
+                <style>body{font-family:sans-serif;background-color:#1E1E1E;color:#E0E0E0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;padding:1em;} .container{max-width:90%;padding:2em;background-color:#2A2A2A;border-radius:8px;box-shadow:0 4px 8px rgba(0,0,0,0.3);} h1{color:#4EC9B0;} .spinner{margin:1em auto;border:4px solid #3A3A3A;border-top:4px solid #4EC9B0;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite;} @keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}</style>
+                <script>
+                    let attempts = 0;
+                    function checkStatus() {
+                        attempts++;
+                        if (attempts > 60) {
+                            document.body.innerHTML = '<div class="container"><h1 style="color:#FF6B6B;">Timeout</h1><p>Download richiede troppo tempo. Riprova più tardi.</p></div>';
+                            return;
+                        }
+                        fetch(window.location.href, {method: 'HEAD', redirect: 'manual'})
+                            .then(r => {
+                                if (r.type === 'opaqueredirect' || r.status === 302) window.location.reload();
+                                else setTimeout(checkStatus, 3000);
+                            })
+                            .catch(() => setTimeout(checkStatus, 3000));
+                    }
+                    setTimeout(checkStatus, 3000);
+                </script>
+                </head><body><div class="container"><h1>Download in corso su Torbox</h1><div class="spinner"></div><p>Il torrent non è in cache e viene scaricato ora.<br>La pagina si aggiornerà automaticamente quando pronto.</p></div></body></html>`;
+                
+                return res.status(200).send(pollingHtml);
 
             } catch (error) {
                 console.error('📦 ❌ Torbox stream error:', error);
