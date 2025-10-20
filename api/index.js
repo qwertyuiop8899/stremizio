@@ -2358,7 +2358,7 @@ async function handleStream(type, id, config, workerOrigin) {
                             
                             // ✅ Proxy through MediaFlow if configured
                             if (debridServices.mediaflowProxy) {
-                                streamUrl = proxyThroughMediaFlow(directUrl, debridServices.mediaflowProxy);
+                                streamUrl = await proxyThroughMediaFlow(directUrl, debridServices.mediaflowProxy);
                             } else {
                                 streamUrl = directUrl;
                             }
@@ -3018,7 +3018,7 @@ export default async function handler(req, res) {
                         // Apply MediaFlow proxy if configured
                         if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
                             try {
-                                finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
+                                finalStreamUrl = await proxyThroughMediaFlow(unrestricted.download, {
                                     url: userConfig.mediaflow_url,
                                     password: userConfig.mediaflow_password
                                 });
@@ -3196,7 +3196,7 @@ export default async function handler(req, res) {
                         url: userConfig.mediaflow_url,
                         password: userConfig.mediaflow_password
                     };
-                    finalStreamUrl = proxyThroughMediaFlow(finalStreamUrl, mediaflowConfig);
+                    finalStreamUrl = await proxyThroughMediaFlow(finalStreamUrl, mediaflowConfig);
                 }
                 
                 console.log(`🚀 Redirecting to personal stream`);
@@ -3269,7 +3269,7 @@ export default async function handler(req, res) {
                     // Apply MediaFlow proxy if configured
                     if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
                         try {
-                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
+                            finalStreamUrl = await proxyThroughMediaFlow(unrestricted.download, {
                                 url: userConfig.mediaflow_url,
                                 password: userConfig.mediaflow_password
                             });
