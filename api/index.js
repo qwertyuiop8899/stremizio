@@ -1543,7 +1543,7 @@ function createDebridServices(config) {
 }
 
 // ✅ MediaFlow Proxy Helper - Using /generate_urls endpoint for proper IP masking
-async function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
+function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
     if (!mediaflowConfig || !mediaflowConfig.url) {
         return directUrl; // No proxy configured, return direct URL
     }
@@ -1552,53 +1552,26 @@ async function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
         const mediaflowUrl = mediaflowConfig.url.replace(/\/+$/, ''); // Remove all trailing slashes
         const password = mediaflowConfig.password || '';
         
-        // Extract filename from URL
+        // Extract filename from URL for better logging/tracking
         const filename = directUrl.split('/').pop() || 'stream.mkv';
         
-        // Use MediaFlow's /generate_urls endpoint for proper IP masking
-        const generateUrlsEndpoint = `${mediaflowUrl}/generate_urls`;
+        // Build MediaFlow proxy URL with direct proxying (not generate_urls)
+        // Format: /proxy/hls/manifest.m3u8?d=<destination>&api_password=<password>
+        // For direct streaming: /proxy/stream/filename.mkv?d=<destination>&api_password=<password>
         
-        const requestBody = {
-            mediaflow_proxy_url: mediaflowUrl,
-            api_password: password,
-            urls: [{
-                endpoint: '/proxy/stream',
-                filename: filename,
-                destination_url: directUrl,
-                request_headers: {},
-                response_headers: {
-                    'Content-Type': 'video/x-matroska'
-                }
-            }]
-        };
+        const encodedDestination = encodeURIComponent(directUrl);
+        const proxyPath = `/proxy/stream/${encodeURIComponent(filename)}`;
         
-        console.log(`🔀 Generating MediaFlow proxy URL via /generate_urls`);
-        
-        const response = await fetch(generateUrlsEndpoint, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(10000) // 10 second timeout
+        // Build query parameters
+        const params = new URLSearchParams({
+            'd': directUrl,
+            'api_password': password
         });
         
-        if (!response.ok) {
-            throw new Error(`MediaFlow API error: ${response.status} ${response.statusText}`);
-        }
+        const proxiedUrl = `${mediaflowUrl}${proxyPath}?${params.toString()}`;
         
-        const data = await response.json();
-        
-        if (data.error) {
-            throw new Error(`MediaFlow error: ${data.error}`);
-        }
-        
-        if (data.urls && data.urls.length > 0) {
-            console.log(`✅ MediaFlow proxy URL generated successfully`);
-            return data.urls[0];
-        } else {
-            throw new Error('No URLs returned from MediaFlow');
-        }
+        console.log(`🔀 MediaFlow proxying enabled: ${filename}`);
+        return proxiedUrl;
         
     } catch (error) {
         console.error(`❌ MediaFlow proxy failed, using direct URL:`, error.message);
@@ -2358,7 +2331,7 @@ async function handleStream(type, id, config, workerOrigin) {
                             
                             // ✅ Proxy through MediaFlow if configured
                             if (debridServices.mediaflowProxy) {
-                                streamUrl = await proxyThroughMediaFlow(directUrl, debridServices.mediaflowProxy);
+                                streamUrl = proxyThroughMediaFlow(directUrl, debridServices.mediaflowProxy);
                             } else {
                                 streamUrl = directUrl;
                             }
@@ -3018,7 +2991,7 @@ export default async function handler(req, res) {
                         // Apply MediaFlow proxy if configured
                         if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
                             try {
-                                finalStreamUrl = await proxyThroughMediaFlow(unrestricted.download, {
+                                finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
                                     url: userConfig.mediaflow_url,
                                     password: userConfig.mediaflow_password
                                 });
@@ -3192,16 +3165,14 @@ export default async function handler(req, res) {
                 
                 // ✅ Proxy through MediaFlow if configured
                 if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
-                    const mediaflowConfig = {
-                        url: userConfig.mediaflow_url,
-                        password: userConfig.mediaflow_password
-                    };
-                    finalStreamUrl = await proxyThroughMediaFlow(finalStreamUrl, mediaflowConfig);
-                }
-                
-                console.log(`🚀 Redirecting to personal stream`);
-
-                res.setHeader('Location', finalStreamUrl);
+                const mediaflowConfig = {
+                    url: userConfig.mediaflow_url,
+                    password: userConfig.mediaflow_password
+                };
+                finalStreamUrl = proxyThroughMediaFlow(finalStreamUrl, mediaflowConfig);
+            }
+            
+            console.log(`🚀 Redirecting to personal stream`);                res.setHeader('Location', finalStreamUrl);
                 return res.status(302).end();
 
             } catch (error) {
@@ -3269,7 +3240,7 @@ export default async function handler(req, res) {
                     // Apply MediaFlow proxy if configured
                     if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
                         try {
-                            finalStreamUrl = await proxyThroughMediaFlow(unrestricted.download, {
+                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
                                 url: userConfig.mediaflow_url,
                                 password: userConfig.mediaflow_password
                             });
