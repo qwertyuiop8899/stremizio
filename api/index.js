@@ -3572,8 +3572,32 @@ export default async function handler(req, res) {
 
                 const torbox = new Torbox(userConfig.torbox_key);
                 
-                // Just add and stream (like RD - Torbox uses cache automatically)
-                console.log(`Adding torrent: ${infoHash}`);
+                // ✅ STEP 1: Check GLOBAL cache first (like AIOStreams does)
+                console.log(`Checking global cache for: ${infoHash}`);
+                const cacheResult = await torbox.checkCache([infoHash]);
+                const cacheInfo = cacheResult[infoHash];
+                
+                if (cacheInfo && cacheInfo.cached && cacheInfo.downloadLink) {
+                    // ⚡ INSTANT: Stream directly from global cache without adding
+                    console.log(`GLOBAL CACHE HIT! Streaming directly`);
+                    
+                    let finalUrl = cacheInfo.downloadLink;
+                    
+                    // Apply MediaFlow proxy if configured
+                    if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
+                        finalUrl = proxyThroughMediaFlow(
+                            finalUrl,
+                            { url: userConfig.mediaflow_url, password: userConfig.mediaflow_password },
+                            workerOrigin
+                        );
+                        console.log(`MediaFlow proxy applied`);
+                    }
+                    
+                    return res.redirect(302, finalUrl);
+                }
+                
+                // ⏳ STEP 2: Not in global cache - add it and wait
+                console.log(`Not in global cache - adding torrent: ${infoHash}`);
                 
                 const addResponse = await torbox.addTorrent(magnetLink);
                 const torrentId = addResponse.torrent_id || addResponse.id;
@@ -3587,7 +3611,7 @@ export default async function handler(req, res) {
                 
                 // If already downloaded (was cached), stream immediately
                 if (torrentInfo.download_finished === true) {
-                    console.log(`Torrent ready (cached)`);
+                    console.log(`Torrent ready after adding`);
                     
                     const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
                     const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
@@ -3605,8 +3629,21 @@ export default async function handler(req, res) {
                     if (!bestFile) throw new Error('Nessun file valido trovato');
                     
                     const downloadData = await torbox.createDownload(torrentId, bestFile.id);
+                    
+                    let finalUrl = downloadData;
+                    
+                    // Apply MediaFlow proxy if configured
+                    if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
+                        finalUrl = proxyThroughMediaFlow(
+                            finalUrl,
+                            { url: userConfig.mediaflow_url, password: userConfig.mediaflow_password },
+                            workerOrigin
+                        );
+                        console.log(`MediaFlow proxy applied`);
+                    }
+                    
                     console.log(`Redirecting to stream`);
-                    return res.redirect(302, downloadData);
+                    return res.redirect(302, finalUrl);
                 }
                 
                 // Not cached - show polling page
