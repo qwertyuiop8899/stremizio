@@ -1542,23 +1542,64 @@ function createDebridServices(config) {
     return services;
 }
 
-// ✅ MediaFlow Proxy Helper
-function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
+// ✅ MediaFlow Proxy Helper - Using /generate_urls endpoint for proper IP masking
+async function proxyThroughMediaFlow(directUrl, mediaflowConfig) {
     if (!mediaflowConfig || !mediaflowConfig.url) {
         return directUrl; // No proxy configured, return direct URL
     }
     
     try {
-        // MediaFlow Proxy format: {mediaflow_url}/proxy/stream?d={base64_encoded_direct_url}&api_password={password}
-        const encodedUrl = btoa(directUrl);
         const mediaflowUrl = mediaflowConfig.url.replace(/\/+$/, ''); // Remove all trailing slashes
         const password = mediaflowConfig.password || '';
         
-        // MediaFlow Proxy uses 'api_password' parameter for authentication
-        const proxiedUrl = `${mediaflowUrl}/proxy/stream?d=${encodedUrl}&api_password=${encodeURIComponent(password)}`;
+        // Extract filename from URL
+        const filename = directUrl.split('/').pop() || 'stream.mkv';
         
-        console.log(`🔀 Proxying URL through MediaFlow`);
-        return proxiedUrl;
+        // Use MediaFlow's /generate_urls endpoint for proper IP masking
+        const generateUrlsEndpoint = `${mediaflowUrl}/generate_urls`;
+        
+        const requestBody = {
+            mediaflow_proxy_url: mediaflowUrl,
+            api_password: password,
+            urls: [{
+                endpoint: '/proxy/stream',
+                filename: filename,
+                destination_url: directUrl,
+                request_headers: {},
+                response_headers: {
+                    'Content-Type': 'video/x-matroska'
+                }
+            }]
+        };
+        
+        console.log(`🔀 Generating MediaFlow proxy URL via /generate_urls`);
+        
+        const response = await fetch(generateUrlsEndpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(10000) // 10 second timeout
+        });
+        
+        if (!response.ok) {
+            throw new Error(`MediaFlow API error: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.error) {
+            throw new Error(`MediaFlow error: ${data.error}`);
+        }
+        
+        if (data.urls && data.urls.length > 0) {
+            console.log(`✅ MediaFlow proxy URL generated successfully`);
+            return data.urls[0];
+        } else {
+            throw new Error('No URLs returned from MediaFlow');
+        }
+        
     } catch (error) {
         console.error(`❌ MediaFlow proxy failed, using direct URL:`, error.message);
         return directUrl;
