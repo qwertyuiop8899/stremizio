@@ -6,6 +6,10 @@ import path from 'path';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
+// ✅ Safe Base64 encoding/decoding for Node.js
+const atob = (str) => Buffer.from(str, 'base64').toString('utf-8');
+const btoa = (str) => Buffer.from(str, 'utf-8').toString('base64');
+
 // ✅ Improved HTML Entity Decoder
 function decodeHtmlEntities(text) {
     const entities = {
