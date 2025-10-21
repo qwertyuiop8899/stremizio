@@ -1307,12 +1307,13 @@ class Torbox {
                 hashes.forEach(hash => {
                     const cacheInfo = data.data[hash.toLowerCase()];
                     
-                    // ✅ EXACT TORRENTIO LOGIC: Consider cached if Torbox says it's cached
-                    // Let /torbox-stream endpoint handle actual file selection and readiness
-                    const isCached = cacheInfo && cacheInfo.cached === true;
+                    // ✅ TORBOX API LOGIC: If hash is present in response data, it's cached
+                    // Torbox API returns the hash entry ONLY if it's in cache
+                    // If not in cache, the hash won't be in the response
+                    const isCached = !!cacheInfo;  // Present = cached
                     
                     results[hash.toLowerCase()] = {
-                        cached: isCached,  // Simple check like Torrentio
+                        cached: isCached,  // Simple presence check
                         downloadLink: null,  // Not needed, /torbox-stream handles everything
                         service: 'Torbox'
                     };
@@ -3792,6 +3793,30 @@ export default async function handler(req, res) {
                     }
                 } catch (error) {
                     console.log(`[Torbox] No existing torrent found: ${error.message}`);
+                }
+                
+                // STEP 1.5: If not found in user torrents, check if it's in GLOBAL cache
+                // This is CRITICAL: if cached, add it instantly without downloading!
+                if (!torrent) {
+                    console.log(`[Torbox] Checking global cache for ${infoHash}`);
+                    try {
+                        const cacheCheck = await torbox.checkCache([infoHash]);
+                        const cacheInfo = cacheCheck[infoHash.toLowerCase()];
+                        
+                        // cacheInfo.cached is now always true if returned by checkCache
+                        if (cacheInfo && cacheInfo.cached) {
+                            console.log(`[Torbox] ⚡ Found in GLOBAL cache! Adding instantly...`);
+                            // Torrent is in global cache, adding will be instant
+                            // Continue to STEP 2 to add it
+                        } else {
+                            console.log(`[Torbox] ⚠️ NOT in cache, will need to download`);
+                            // Not in cache, show downloading placeholder immediately
+                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
+                        }
+                    } catch (cacheError) {
+                        console.log(`[Torbox] Cache check failed: ${cacheError.message}, will try to add anyway`);
+                        // If cache check fails, be optimistic and try to add
+                    }
                 }
                 
                 // STEP 2: If not found, create new torrent (like Torrentio _createTorrent)
