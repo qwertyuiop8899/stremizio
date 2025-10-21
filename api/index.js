@@ -6,6 +6,9 @@ import path from 'path';
 
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
 
+// ✅ Torrentio placeholder videos (hosted by Torrentio)
+const TORRENTIO_VIDEO_BASE = 'https://torrentio.strem.fun';
+
 // ✅ Safe Base64 encoding/decoding for Node.js
 const atob = (str) => Buffer.from(str, 'base64').toString('utf-8');
 const btoa = (str) => Buffer.from(str, 'utf-8').toString('base64');
@@ -2984,7 +2987,7 @@ export default async function handler(req, res) {
                     
                     if (!targetFile) {
                         console.log(`[RealDebrid] No video file found`);
-                        return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
                     }
                     
                     // Find the link for the target file
@@ -2994,7 +2997,7 @@ export default async function handler(req, res) {
                     
                     if (!downloadLink) {
                         console.log(`[RealDebrid] No download link found`);
-                        return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
                     }
                     
                     const unrestricted = await realdebrid.unrestrictLink(downloadLink);
@@ -3002,7 +3005,7 @@ export default async function handler(req, res) {
                     // Check if it's a RAR archive
                     if (unrestricted.download?.endsWith('.rar') || unrestricted.download?.endsWith('.zip')) {
                         console.log(`[RealDebrid] Failed: RAR archive`);
-                        return res.redirect(302, `${workerOrigin}/videos/failed_rar_v2.mp4`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
                     }
                     
                     let finalUrl = unrestricted.download;
@@ -3028,22 +3031,22 @@ export default async function handler(req, res) {
                 } else if (statusDownloading || statusOpening || statusWaitingSelection) {
                     // ⏳ DOWNLOADING: Show placeholder video
                     console.log(`[RealDebrid] Torrent is downloading (status: ${torrent.status})...`);
-                    return res.redirect(302, `${workerOrigin}/videos/downloading_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
                     
                 } else if (statusMagnetError) {
                     // ❌ MAGNET ERROR: Show failed opening video
                     console.log(`[RealDebrid] Magnet error`);
-                    return res.redirect(302, `${workerOrigin}/videos/failed_opening_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_opening_v2.mp4`);
                     
                 } else if (statusError) {
                     // ❌ ERROR: Show failed video
                     console.log(`[RealDebrid] Torrent failed`);
-                    return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
                 }
                 
                 // Fallback: something went wrong
                 console.log(`[RealDebrid] Unknown state (${torrent.status}), showing failed video`);
-                return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
 
             } catch (error) {
                 console.error('🔵 ❌ RD stream error:', error);
@@ -3054,30 +3057,30 @@ export default async function handler(req, res) {
                 if (errorMsg.includes('429') || errorMsg.includes('rate limit')) {
                     // Too many requests - show downloading placeholder
                     console.log(`[RealDebrid] Rate limited, showing downloading placeholder`);
-                    return res.redirect(302, `${workerOrigin}/videos/downloading_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
                 }
                 
                 if (errorMsg.includes('400') || errorMsg.includes('not found') || errorMsg.includes('invalid')) {
                     // Torrent not available or invalid
                     console.log(`[RealDebrid] Torrent not available (400/404)`);
-                    return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
                 }
                 
                 if (errorMsg.includes('rar') || errorMsg.includes('zip')) {
                     // Archive format not supported
                     console.log(`[RealDebrid] Archive format not supported`);
-                    return res.redirect(302, `${workerOrigin}/videos/failed_rar_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
                 }
                 
                 if (errorMsg.includes('magnet')) {
                     // Magnet error
                     console.log(`[RealDebrid] Magnet conversion error`);
-                    return res.redirect(302, `${workerOrigin}/videos/failed_opening_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_opening_v2.mp4`);
                 }
                 
                 // Generic error: show failed placeholder
                 console.log(`[RealDebrid] Generic error, showing failed video`);
-                return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
             }
         }
         
@@ -3656,14 +3659,20 @@ export default async function handler(req, res) {
                     
                     try {
                         const addResponse = await torbox.addTorrent(magnetLink);
-                        const torrentId = addResponse.torrent_id || addResponse.id;
-                        if (!torrentId) throw new Error('Failed to get torrent ID');
                         
-                        // Wait for Torbox to process
-                        await new Promise(resolve => setTimeout(resolve, 2000));
-                        
-                        // Get torrent info
-                        torrent = await torbox.getTorrentInfo(torrentId);
+                        // Handle different response types from Torbox (like Torrentio does)
+                        if (addResponse.torrent_id) {
+                            // Torrent created and ready
+                            const torrentId = addResponse.torrent_id;
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            torrent = await torbox.getTorrentInfo(torrentId);
+                        } else if (addResponse.queued_id) {
+                            // Torrent is queued (like Torrentio: download_state === 'metaDL')
+                            console.log(`[Torbox] Torrent queued with ID: ${addResponse.queued_id}`);
+                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
+                        } else {
+                            throw new Error(`Unexpected Torbox response: ${JSON.stringify(addResponse)}`);
+                        }
                         
                     } catch (addError) {
                         // If we get 400, it might mean:
@@ -3678,7 +3687,7 @@ export default async function handler(req, res) {
                             // Torrent not available in Torbox cache
                             // Show placeholder indicating it's being added to download queue
                             console.log(`[Torbox] Torrent not cached, starting download...`);
-                            return res.redirect(302, `${workerOrigin}/videos/downloading_v2.mp4`);
+                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
                         }
                         
                         // For other errors, re-throw
@@ -3714,7 +3723,7 @@ export default async function handler(req, res) {
                     if (!targetVideo) {
                         if (torrent.files.every(file => file.name?.endsWith('.rar') || file.name?.endsWith('.zip'))) {
                             console.log(`[Torbox] Failed: RAR archive`);
-                            return res.redirect(302, `${workerOrigin}/videos/failed_rar_v2.mp4`);
+                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
                         }
                         throw new Error('No video file found');
                     }
@@ -3727,17 +3736,17 @@ export default async function handler(req, res) {
                 } else if (statusDownloading) {
                     // ⏳ DOWNLOADING: Show placeholder video
                     console.log(`[Torbox] Torrent is downloading...`);
-                    return res.redirect(302, `${workerOrigin}/videos/downloading_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
                     
                 } else if (statusError) {
                     // ❌ ERROR: Show failed video
                     console.log(`[Torbox] Torrent failed`);
-                    return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
                 }
                 
                 // Fallback: something went wrong
                 console.log(`[Torbox] Unknown state, showing failed video`);
-                return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
 
             } catch (error) {
                 console.error('📦 ❌ Torbox stream error:', error);
@@ -3748,18 +3757,18 @@ export default async function handler(req, res) {
                 if (errorMsg.includes('400') || errorMsg.includes('not found') || errorMsg.includes('invalid')) {
                     // Torrent not available or invalid
                     console.log(`[Torbox] Torrent not available (400/404)`);
-                    return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
                 }
                 
                 if (errorMsg.includes('rar') || errorMsg.includes('zip')) {
                     // Archive format not supported
                     console.log(`[Torbox] Archive format not supported`);
-                    return res.redirect(302, `${workerOrigin}/videos/failed_rar_v2.mp4`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
                 }
                 
                 // Generic error: show failed placeholder
                 console.log(`[Torbox] Generic error, showing failed video`);
-                return res.redirect(302, `${workerOrigin}/videos/download_failed_v2.mp4`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
             }
         }
 
