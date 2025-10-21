@@ -1156,49 +1156,13 @@ class RealDebrid {
                     batch.forEach(hash => {
                         const hashLower = hash.toLowerCase();
                         const cacheInfo = data[hashLower];
-                        const isCached = cacheInfo && cacheInfo.rd && cacheInfo.rd.length > 0;
-                        let downloadLink = null;
-                        let isActuallyCachedAndStreamable = false; // New flag to indicate if a streamable file was found
                         
-                        if (isCached) {
-                            const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
-                            const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
-
-                            let bestFile = null;
-
-                            for (const variant of cacheInfo.rd) {
-                                for (const fileId in variant) {
-                                    const file = variant[fileId];
-                                    if (!file.filename) continue;
-                                    const lowerFilename = file.filename.toLowerCase();
-
-                                    const hasVideoExtension = videoExtensions.some(ext => lowerFilename.endsWith(ext));
-                                    if (!hasVideoExtension) {
-                                        continue; // Must be a video file
-                                    }
-
-                                    // Filter out small files that are likely samples or trailers.
-                                    const isLikelyJunk = junkKeywords.some(junk => lowerFilename.includes(junk)) && file.filesize < 250 * 1024 * 1024; // 250 MB threshold
-                                    if (isLikelyJunk) {
-                                        continue;
-                                    }
-                                    if (!bestFile || file.filesize > bestFile.filesize) {
-                                        bestFile = file;
-                                    }
-                                }
-                            }
-
-                            if (bestFile) {
-                                downloadLink = bestFile.link;
-                                isActuallyCachedAndStreamable = true; // Found a streamable file
-                            } else {
-                                console.warn(`⚠️ Torrent ${hashLower} is in RD cache but no suitable video file found for direct streaming.`);
-                            }
-                        }
-
+                        // ✅ EXACT TORRENTIO LOGIC: Consider cached if RD has ANY variant available
+                        const isCached = cacheInfo && cacheInfo.rd && cacheInfo.rd.length > 0;
+                        
                         results[hashLower] = {
-                            cached: isActuallyCachedAndStreamable, // Use the new flag
-                            downloadLink: downloadLink,
+                            cached: isCached,  // Simple check like Torrentio
+                            downloadLink: null,  // Not needed, /rd-stream handles unrestricting
                             service: 'Real-Debrid'
                         };
                     });
@@ -3662,10 +3626,17 @@ export default async function handler(req, res) {
                         
                         // Handle different response types from Torbox (like Torrentio does)
                         if (addResponse.torrent_id) {
-                            // Torrent created and ready
+                            // Torrent created, try to get info
                             const torrentId = addResponse.torrent_id;
                             await new Promise(resolve => setTimeout(resolve, 2000));
-                            torrent = await torbox.getTorrentInfo(torrentId);
+                            
+                            try {
+                                torrent = await torbox.getTorrentInfo(torrentId);
+                            } catch (getTorrentError) {
+                                // Torrent not yet in list, show downloading placeholder
+                                console.log(`[Torbox] Torrent ${torrentId} not yet in list, showing downloading...`);
+                                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
+                            }
                         } else if (addResponse.queued_id) {
                             // Torrent is queued (like Torrentio: download_state === 'metaDL')
                             console.log(`[Torbox] Torrent queued with ID: ${addResponse.queued_id}`);
