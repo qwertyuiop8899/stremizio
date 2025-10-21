@@ -2910,109 +2910,147 @@ export default async function handler(req, res) {
 
                 const realdebrid = new RealDebrid(userConfig.rd_key);
                 
-                // ✅ SIMPLE APPROACH: Just try to add the magnet and get the stream
-                // If it's cached (personal or global), RD will handle it automatically
-                console.log(`🔵 📥 Adding/getting torrent: ${infoHash}`);
+                console.log(`[RealDebrid] Resolving ${infoHash}`);
                 
-                const addResponse = await realdebrid.addMagnet(magnetLink);
-                const torrentId = addResponse.id;
-                if (!torrentId) throw new Error('Impossibile ottenere l\'ID del torrent da Real-Debrid.');
-                
-                // Get torrent info
-                const torrentInfo = await realdebrid.getTorrentInfo(torrentId);
-                
-                // If files need selection, select the biggest video file
-                if (torrentInfo.status === 'waiting_files_selection') {
-                    console.log(`🔵 📂 Selecting files for torrent ${torrentId}`);
-                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'];
-                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
-                    
-                    const videoFiles = torrentInfo.files.filter(file => {
-                        const lowerPath = file.path.toLowerCase();
-                        return videoExtensions.some(ext => lowerPath.endsWith(ext)) &&
-                               !junkKeywords.some(junk => lowerPath.includes(junk));
-                    });
-                    
-                    const fileToDownload = videoFiles.length > 0
-                        ? videoFiles.reduce((max, file) => (file.bytes > max.bytes ? file : max), videoFiles[0])
-                        : torrentInfo.files.reduce((max, file) => (file.bytes > max.bytes ? file : max), torrentInfo.files[0]);
-                    
-                    if (!fileToDownload) throw new Error('Impossibile determinare il file da scaricare.');
-                    
-                    await realdebrid.selectFiles(torrentId, fileToDownload.id);
-                    console.log(`🔵 ✅ Selected file: ${fileToDownload.path}`);
+                // STEP 1: Try to find existing torrent (like Torrentio _findTorrent)
+                let torrent = null;
+                try {
+                    const torrents = await realdebrid.getTorrents();
+                    const foundTorrents = torrents.filter(t => t.hash?.toLowerCase() === infoHash.toLowerCase());
+                    const nonFailedTorrent = foundTorrents.find(t => !['error', 'magnet_error'].includes(t.status));
+                    torrent = nonFailedTorrent || foundTorrents[0];
+                    if (torrent) {
+                        console.log(`[RealDebrid] Found existing torrent ID: ${torrent.id}`);
+                    }
+                } catch (error) {
+                    console.log(`[RealDebrid] No existing torrent found: ${error.message}`);
                 }
                 
-                // Get updated torrent info after selection
-                const updatedInfo = await realdebrid.getTorrentInfo(torrentId);
+                // STEP 2: If not found, create new torrent (like Torrentio _createTorrent)
+                if (!torrent) {
+                    console.log(`[RealDebrid] Adding new magnet`);
+                    const addResponse = await realdebrid.addMagnet(magnetLink);
+                    const torrentId = addResponse.id;
+                    if (!torrentId) throw new Error('Failed to get torrent ID');
+                    
+                    torrent = await realdebrid.getTorrentInfo(torrentId);
+                }
                 
-                // If already downloaded (was cached), stream immediately
-                if (updatedInfo.status === 'downloaded') {
-                    console.log(`🔵 ⚡ Torrent ready (cached or just completed)`);
+                // STEP 3: Handle file selection if needed (like Torrentio _selectTorrentFiles)
+                if (torrent.status === 'waiting_files_selection') {
+                    console.log(`[RealDebrid] Selecting files...`);
+                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'];
+                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
+                    
+                    const videoFiles = (torrent.files || [])
+                        .filter(file => {
+                            const lowerPath = file.path.toLowerCase();
+                            return videoExtensions.some(ext => lowerPath.endsWith(ext));
+                        })
+                        .filter(file => {
+                            const lowerPath = file.path.toLowerCase();
+                            return !junkKeywords.some(junk => lowerPath.includes(junk)) || file.bytes > 250 * 1024 * 1024;
+                        })
+                        .sort((a, b) => b.bytes - a.bytes);
+                    
+                    const targetFile = videoFiles[0] || torrent.files.sort((a, b) => b.bytes - a.bytes)[0];
+                    
+                    if (targetFile) {
+                        await realdebrid.selectFiles(torrent.id, targetFile.id);
+                        torrent = await realdebrid.getTorrentInfo(torrent.id);
+                    }
+                }
+                
+                // STEP 4: Check torrent status (like Torrentio statusReady/statusDownloading)
+                const statusReady = ['downloaded', 'dead'].includes(torrent.status);
+                const statusDownloading = ['downloading', 'uploading', 'queued'].includes(torrent.status);
+                const statusMagnetError = torrent.status === 'magnet_error';
+                const statusError = ['error', 'magnet_error'].includes(torrent.status);
+                const statusOpening = torrent.status === 'magnet_conversion';
+                const statusWaitingSelection = torrent.status === 'waiting_files_selection';
+                
+                if (statusReady) {
+                    // ✅ READY: Unrestrict and stream
+                    console.log(`[RealDebrid] Torrent ready, unrestricting...`);
                     
                     const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'];
                     const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
                     
-                    const selectedVideoFiles = updatedInfo.files.filter(file => 
-                        file.selected === 1 && 
-                        videoExtensions.some(ext => file.path.toLowerCase().endsWith(ext)) && 
-                        !junkKeywords.some(junk => file.path.toLowerCase().includes(junk))
-                    );
+                    const selectedFiles = (torrent.files || []).filter(file => file.selected === 1);
+                    const videos = selectedFiles
+                        .filter(file => {
+                            const lowerPath = file.path.toLowerCase();
+                            return videoExtensions.some(ext => lowerPath.endsWith(ext));
+                        })
+                        .filter(file => {
+                            const lowerPath = file.path.toLowerCase();
+                            return !junkKeywords.some(junk => lowerPath.includes(junk)) || file.bytes > 250 * 1024 * 1024;
+                        })
+                        .sort((a, b) => b.bytes - a.bytes);
                     
-                    let mainFile = selectedVideoFiles.length > 0 
-                        ? selectedVideoFiles.reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null)
-                        : updatedInfo.files.filter(f => f.selected === 1).reduce((max, file) => (file.bytes > (max?.bytes || 0) ? file : max), null);
+                    const targetFile = videos[0] || selectedFiles.sort((a, b) => b.bytes - a.bytes)[0];
                     
-                    if (!mainFile) throw new Error('Nessun file valido trovato.');
+                    if (!targetFile) {
+                        console.log(`[RealDebrid] No video file found`);
+                        return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed.mp4');
+                    }
                     
-                    const filename = mainFile.path.split('/').pop();
-                    let downloadLink = updatedInfo.links.find(link => decodeURIComponent(link).endsWith(filename));
-                    if (!downloadLink) downloadLink = updatedInfo.links[0]; // Fallback to first link
+                    // Find the link for the target file
+                    const filename = targetFile.path.split('/').pop();
+                    let downloadLink = (torrent.links || []).find(link => decodeURIComponent(link).endsWith(filename));
+                    if (!downloadLink) downloadLink = torrent.links[0]; // Fallback
+                    
+                    if (!downloadLink) {
+                        console.log(`[RealDebrid] No download link found`);
+                        return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed.mp4');
+                    }
                     
                     const unrestricted = await realdebrid.unrestrictLink(downloadLink);
-                    let finalStreamUrl = unrestricted.download;
                     
+                    // Check if it's a RAR archive
+                    if (unrestricted.download?.endsWith('.rar') || unrestricted.download?.endsWith('.zip')) {
+                        console.log(`[RealDebrid] Failed: RAR archive`);
+                        return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed-rar.mp4');
+                    }
+                    
+                    let finalUrl = unrestricted.download;
+                    
+                    // Apply MediaFlow proxy if configured (ONLY for RealDebrid!)
                     if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
                         try {
-                            finalStreamUrl = proxyThroughMediaFlow(unrestricted.download, {
-                                url: userConfig.mediaflow_url,
-                                password: userConfig.mediaflow_password
-                            }, workerOrigin);
-                            console.log(`🔒 Applied MediaFlow proxy`);
+                            finalUrl = proxyThroughMediaFlow(
+                                unrestricted.download,
+                                { url: userConfig.mediaflow_url, password: userConfig.mediaflow_password },
+                                workerOrigin
+                            );
+                            console.log(`[RealDebrid] MediaFlow proxy applied`);
                         } catch (mfError) {
-                            console.warn(`⚠️ MediaFlow proxy failed: ${mfError.message}`);
+                            console.warn(`[RealDebrid] MediaFlow proxy failed: ${mfError.message}`);
                         }
                     }
                     
-                    console.log(`🔵 🚀 Redirecting to stream`);
-                    return res.redirect(302, finalStreamUrl);
+                    console.log(`[RealDebrid] Redirecting to stream`);
+                    return res.redirect(302, finalUrl);
+                    
+                } else if (statusDownloading || statusOpening || statusWaitingSelection) {
+                    // ⏳ DOWNLOADING: Show placeholder video
+                    console.log(`[RealDebrid] Torrent is downloading (status: ${torrent.status})...`);
+                    return res.redirect(302, 'https://torrentio-v003.surge.sh/static-downloading.mp4');
+                    
+                } else if (statusMagnetError) {
+                    // ❌ MAGNET ERROR: Show failed opening video
+                    console.log(`[RealDebrid] Magnet error`);
+                    return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed-opening.mp4');
+                    
+                } else if (statusError) {
+                    // ❌ ERROR: Show failed video
+                    console.log(`[RealDebrid] Torrent failed`);
+                    return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed.mp4');
                 }
                 
-                // Not cached - show polling page
-                console.log(`🔵 ⏳ Torrent downloading (status: ${updatedInfo.status})`);
-                const pollingHtml = `
-                <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Download in corso</title>
-                <style>body{font-family:sans-serif;background-color:#1E1E1E;color:#E0E0E0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;padding:1em;} .container{max-width:90%;padding:2em;background-color:#2A2A2A;border-radius:8px;box-shadow:0 4px 8px rgba(0,0,0,0.3);} h1{color:#4EC9B0;} .spinner{margin:1em auto;border:4px solid #3A3A3A;border-top:4px solid #4EC9B0;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite;} @keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}</style>
-                <script>
-                    let attempts = 0;
-                    function checkStatus() {
-                        attempts++;
-                        if (attempts > 60) {
-                            document.body.innerHTML = '<div class="container"><h1 style="color:#FF6B6B;">Timeout</h1><p>Download richiede troppo tempo. Riprova più tardi.</p></div>';
-                            return;
-                        }
-                        fetch(window.location.href, {method: 'HEAD', redirect: 'manual'})
-                            .then(r => {
-                                if (r.type === 'opaqueredirect' || r.status === 302) window.location.reload();
-                                else setTimeout(checkStatus, 3000);
-                            })
-                            .catch(() => setTimeout(checkStatus, 3000));
-                    }
-                    setTimeout(checkStatus, 3000);
-                </script>
-                </head><body><div class="container"><h1>Download in corso su Real-Debrid</h1><div class="spinner"></div><p>Il torrent non è in cache e viene scaricato ora.<br>La pagina si aggiornerà automaticamente quando pronto.</p></div></body></html>`;
-                
-                return res.status(200).send(pollingHtml);
+                // Fallback: something went wrong
+                console.log(`[RealDebrid] Unknown state (${torrent.status}), showing failed video`);
+                return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed.mp4');
 
             } catch (error) {
                 console.error('🔵 ❌ RD stream error:', error);
@@ -3572,105 +3610,88 @@ export default async function handler(req, res) {
 
                 const torbox = new Torbox(userConfig.torbox_key);
                 
-                // ✅ STEP 1: Check GLOBAL cache first (like AIOStreams does)
-                console.log(`Checking global cache for: ${infoHash}`);
-                const cacheResult = await torbox.checkCache([infoHash]);
-                const cacheInfo = cacheResult[infoHash];
+                console.log(`[Torbox] Resolving ${infoHash}`);
                 
-                if (cacheInfo && cacheInfo.cached && cacheInfo.downloadLink) {
-                    // ⚡ INSTANT: Stream directly from global cache without adding
-                    console.log(`GLOBAL CACHE HIT! Streaming directly`);
-                    
-                    let finalUrl = cacheInfo.downloadLink;
-                    
-                    // Apply MediaFlow proxy if configured
-                    if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
-                        finalUrl = proxyThroughMediaFlow(
-                            finalUrl,
-                            { url: userConfig.mediaflow_url, password: userConfig.mediaflow_password },
-                            workerOrigin
-                        );
-                        console.log(`MediaFlow proxy applied`);
+                // STEP 1: Try to find existing torrent (like Torrentio _findTorrent)
+                let torrent = null;
+                try {
+                    const torrents = await torbox.getTorrents();
+                    const foundTorrents = torrents.filter(t => t.hash?.toLowerCase() === infoHash.toLowerCase());
+                    const nonFailedTorrent = foundTorrents.find(t => t.active || t.download_finished);
+                    torrent = nonFailedTorrent || foundTorrents[0];
+                    if (torrent) {
+                        console.log(`[Torbox] Found existing torrent ID: ${torrent.id}`);
                     }
-                    
-                    return res.redirect(302, finalUrl);
+                } catch (error) {
+                    console.log(`[Torbox] No existing torrent found: ${error.message}`);
                 }
                 
-                // ⏳ STEP 2: Not in global cache - add it and wait
-                console.log(`Not in global cache - adding torrent: ${infoHash}`);
+                // STEP 2: If not found, create new torrent (like Torrentio _createTorrent)
+                if (!torrent) {
+                    console.log(`[Torbox] Creating new torrent`);
+                    const addResponse = await torbox.addTorrent(magnetLink);
+                    const torrentId = addResponse.torrent_id || addResponse.id;
+                    if (!torrentId) throw new Error('Failed to get torrent ID');
+                    
+                    // Wait for Torbox to process
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    
+                    // Get torrent info
+                    torrent = await torbox.getTorrentInfo(torrentId);
+                }
                 
-                const addResponse = await torbox.addTorrent(magnetLink);
-                const torrentId = addResponse.torrent_id || addResponse.id;
-                if (!torrentId) throw new Error('Impossibile ottenere l\'ID del torrent da Torbox.');
+                // STEP 3: Check torrent status (like Torrentio statusReady/statusDownloading)
+                const statusReady = torrent?.download_present;  // ← CRITICAL: use download_present not download_finished!
+                const statusDownloading = !statusReady && torrent?.active;
+                const statusError = !torrent?.active && !torrent?.download_finished;
                 
-                // Wait a bit for Torbox to process
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
-                // Get torrent info
-                const torrentInfo = await torbox.getTorrentInfo(torrentId);
-                
-                // If already downloaded (was cached), stream immediately
-                if (torrentInfo.download_finished === true) {
-                    console.log(`Torrent ready after adding`);
+                if (statusReady) {
+                    // ✅ READY: Unrestrict and stream
+                    console.log(`[Torbox] Torrent ready, unrestricting...`);
                     
                     const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
                     const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
                     
-                    const videoFiles = (torrentInfo.files || []).filter(file => {
-                        const lowerName = file.name?.toLowerCase() || '';
-                        return videoExtensions.some(ext => lowerName.endsWith(ext)) &&
-                               !junkKeywords.some(junk => lowerName.includes(junk));
-                    });
+                    const videos = (torrent.files || [])
+                        .filter(file => {
+                            const lowerName = file.name?.toLowerCase() || '';
+                            return videoExtensions.some(ext => lowerName.endsWith(ext));
+                        })
+                        .filter(file => {
+                            const lowerName = file.name?.toLowerCase() || '';
+                            return !junkKeywords.some(junk => lowerName.includes(junk)) || file.size > 250 * 1024 * 1024;
+                        })
+                        .sort((a, b) => b.size - a.size);
                     
-                    const bestFile = videoFiles.length > 0
-                        ? videoFiles.reduce((max, f) => (f.size > max.size ? f : max), videoFiles[0])
-                        : (torrentInfo.files || [])[0];
+                    const targetVideo = videos[0];
                     
-                    if (!bestFile) throw new Error('Nessun file valido trovato');
-                    
-                    const downloadData = await torbox.createDownload(torrentId, bestFile.id);
-                    
-                    let finalUrl = downloadData;
-                    
-                    // Apply MediaFlow proxy if configured
-                    if (userConfig.mediaflow_url && userConfig.mediaflow_password) {
-                        finalUrl = proxyThroughMediaFlow(
-                            finalUrl,
-                            { url: userConfig.mediaflow_url, password: userConfig.mediaflow_password },
-                            workerOrigin
-                        );
-                        console.log(`MediaFlow proxy applied`);
+                    if (!targetVideo) {
+                        if (torrent.files.every(file => file.name?.endsWith('.rar') || file.name?.endsWith('.zip'))) {
+                            console.log(`[Torbox] Failed: RAR archive`);
+                            return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed-rar.mp4');
+                        }
+                        throw new Error('No video file found');
                     }
                     
-                    console.log(`Redirecting to stream`);
-                    return res.redirect(302, finalUrl);
+                    const downloadUrl = await torbox.createDownload(torrent.id, targetVideo.id);
+                    
+                    console.log(`[Torbox] Redirecting to stream (direct, no MediaFlow)`);
+                    return res.redirect(302, downloadUrl);
+                    
+                } else if (statusDownloading) {
+                    // ⏳ DOWNLOADING: Show placeholder video
+                    console.log(`[Torbox] Torrent is downloading...`);
+                    return res.redirect(302, 'https://torrentio-v003.surge.sh/static-downloading.mp4');
+                    
+                } else if (statusError) {
+                    // ❌ ERROR: Show failed video
+                    console.log(`[Torbox] Torrent failed`);
+                    return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed.mp4');
                 }
                 
-                // Not cached - show polling page
-                console.log(`Torrent downloading (ID: ${torrentId})`);
-                const pollingHtml = `
-                <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Download in corso</title>
-                <style>body{font-family:sans-serif;background-color:#1E1E1E;color:#E0E0E0;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;text-align:center;padding:1em;} .container{max-width:90%;padding:2em;background-color:#2A2A2A;border-radius:8px;box-shadow:0 4px 8px rgba(0,0,0,0.3);} h1{color:#4EC9B0;} .spinner{margin:1em auto;border:4px solid #3A3A3A;border-top:4px solid #4EC9B0;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite;} @keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}</style>
-                <script>
-                    let attempts = 0;
-                    function checkStatus() {
-                        attempts++;
-                        if (attempts > 60) {
-                            document.body.innerHTML = '<div class="container"><h1 style="color:#FF6B6B;">Timeout</h1><p>Download richiede troppo tempo. Riprova più tardi.</p></div>';
-                            return;
-                        }
-                        fetch(window.location.href, {method: 'HEAD', redirect: 'manual'})
-                            .then(r => {
-                                if (r.type === 'opaqueredirect' || r.status === 302) window.location.reload();
-                                else setTimeout(checkStatus, 3000);
-                            })
-                            .catch(() => setTimeout(checkStatus, 3000));
-                    }
-                    setTimeout(checkStatus, 3000);
-                </script>
-                </head><body><div class="container"><h1>Download in corso su Torbox</h1><div class="spinner"></div><p>Il torrent non è in cache e viene scaricato ora.<br>La pagina si aggiornerà automaticamente quando pronto.</p></div></body></html>`;
-                
-                return res.status(200).send(pollingHtml);
+                // Fallback: something went wrong
+                console.log(`[Torbox] Unknown state, showing failed video`);
+                return res.redirect(302, 'https://torrentio-v003.surge.sh/static-failed.mp4');
 
             } catch (error) {
                 console.error('📦 ❌ Torbox stream error:', error);
