@@ -1475,14 +1475,132 @@ class Torbox {
     }
 }
 
-// ✅ Debrid Service Factory - Supports both services simultaneously
+// ✅ AllDebrid API integration
+class AllDebrid {
+    constructor(apiKey) {
+        this.apiKey = apiKey;
+        this.baseUrl = 'https://api.alldebrid.com/v4';
+    }
+
+    async checkCache(hashes) {
+        if (!hashes || hashes.length === 0) return {};
+        
+        const results = {};
+        
+        try {
+            // AllDebrid uses /magnet/instant endpoint
+            const magnets = hashes.map(h => `magnet:?xt=urn:btih:${h}`);
+            const url = `${this.baseUrl}/magnet/instant?agent=stremio&apikey=${this.apiKey}`;
+            
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ magnets })
+            });
+            
+            const data = await response.json();
+            
+            if (response.ok && data.status === 'success') {
+                const magnetData = data.data.magnets || [];
+                
+                magnetData.forEach((item, index) => {
+                    const hash = hashes[index]?.toLowerCase();
+                    if (!hash) return;
+                    
+                    // AllDebrid returns instant: true if cached
+                    results[hash] = {
+                        cached: item.instant === true,
+                        service: 'AllDebrid'
+                    };
+                });
+            }
+        } catch (error) {
+            console.error('AllDebrid cache check failed:', error);
+            hashes.forEach(hash => {
+                results[hash.toLowerCase()] = { cached: false, service: 'AllDebrid' };
+            });
+        }
+        
+        return results;
+    }
+
+    async uploadMagnet(magnetLink) {
+        const url = `${this.baseUrl}/magnet/upload?agent=stremio&apikey=${this.apiKey}`;
+        
+        const formData = new URLSearchParams();
+        formData.append('magnets[]', magnetLink);
+        
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: formData
+        });
+        
+        if (!response.ok) {
+            throw new Error(`AllDebrid API error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.status !== 'success') {
+            throw new Error(`AllDebrid error: ${data.error?.message || 'Unknown error'}`);
+        }
+        
+        // Returns { id: magnetId }
+        return data.data.magnets[0];
+    }
+
+    async getMagnetStatus(magnetId) {
+        const url = `${this.baseUrl}/magnet/status?agent=stremio&apikey=${this.apiKey}&id=${magnetId}`;
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            throw new Error(`AllDebrid API error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.status !== 'success') {
+            throw new Error(`AllDebrid error: ${data.error?.message || 'Unknown error'}`);
+        }
+        
+        return data.data.magnets;
+    }
+
+    async unlockLink(link) {
+        const url = `${this.baseUrl}/link/unlock?agent=stremio&apikey=${this.apiKey}&link=${encodeURIComponent(link)}`;
+        
+        const response = await fetch(url);
+        
+        if (!response.ok) {
+            throw new Error(`AllDebrid API error: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.status !== 'success') {
+            throw new Error(`AllDebrid error: ${data.error?.message || 'Unknown error'}`);
+        }
+        
+        return data.data.link;
+    }
+}
+
+// ✅ Debrid Service Factory - Supports RealDebrid, Torbox, and AllDebrid
 function createDebridServices(config) {
     const services = {
         realdebrid: null,
         torbox: null,
+        alldebrid: null,
         useRealDebrid: false,
         useTorbox: false,
-        mediaflowProxy: null // NEW: MediaFlow Proxy config
+        useAllDebrid: false,
+        mediaflowProxy: null // MediaFlow Proxy config (for RD sharing)
     };
     
     // Check RealDebrid
@@ -1499,6 +1617,13 @@ function createDebridServices(config) {
         services.useTorbox = true;
     }
     
+    // Check AllDebrid
+    if (config.use_alldebrid && config.alldebrid_key && config.alldebrid_key.length > 5) {
+        console.log('🅰️ AllDebrid enabled');
+        services.alldebrid = new AllDebrid(config.alldebrid_key);
+        services.useAllDebrid = true;
+    }
+    
     // Check MediaFlow Proxy (for RD sharing)
     if (config.mediaflow_url && config.mediaflow_password) {
         console.log('🔀 MediaFlow Proxy enabled for RD sharing');
@@ -1508,7 +1633,7 @@ function createDebridServices(config) {
         };
     }
     
-    if (!services.useRealDebrid && !services.useTorbox) {
+    if (!services.useRealDebrid && !services.useTorbox && !services.useAllDebrid) {
         console.log('⚪ No debrid service enabled - using P2P mode');
     }
     
@@ -1870,12 +1995,14 @@ async function handleStream(type, id, config, workerOrigin) {
         // Usa la configurazione passata, con fallback alle variabili d'ambiente
         const tmdbKey = config.tmdb_key;
         
-        // ✅ Use debrid services factory (supports both RD and Torbox)
+        // ✅ Use debrid services factory (supports RD, Torbox, and AllDebrid)
         const debridServices = createDebridServices(config);
         const useRealDebrid = debridServices.useRealDebrid;
         const useTorbox = debridServices.useTorbox;
+        const useAllDebrid = debridServices.useAllDebrid;
         const rdService = debridServices.realdebrid;
         const torboxService = debridServices.torbox;
+        const adService = debridServices.alldebrid;
 
         let imdbId = null;
         let kitsuId = null;
@@ -2226,6 +2353,7 @@ async function handleStream(type, id, config, workerOrigin) {
         let rdUserTorrents = [];
         let torboxCacheResults = {};
         let torboxUserTorrents = [];
+        let adCacheResults = {};
 
         const cacheChecks = [];
         
@@ -2261,9 +2389,20 @@ async function handleStream(type, id, config, workerOrigin) {
             );
         }
         
+        if (useAllDebrid) {
+            console.log('🅰️ Checking AllDebrid cache...');
+            cacheChecks.push(
+                adService.checkCache(hashes).then(cache => {
+                    adCacheResults = cache;
+                }).catch(e => {
+                    console.error("⚠️ Failed to fetch AllDebrid cache.", e.message);
+                })
+            );
+        }
+        
         await Promise.all(cacheChecks);
         
-        console.log(`✅ Cache check complete. RD: ${rdUserTorrents.length} torrents, Torbox: ${torboxUserTorrents.length} torrents`);
+        console.log(`✅ Cache check complete. RD: ${rdUserTorrents.length} torrents, Torbox: ${torboxUserTorrents.length} torrents, AllDebrid: ${Object.keys(adCacheResults).length} hashes`);
         
         // ✅ Build streams with enhanced error handling - supports multiple debrid services
         const streams = [];
@@ -2425,8 +2564,74 @@ async function handleStream(type, id, config, workerOrigin) {
                     });
                 }
                 
+                // ✅ ALLDEBRID STREAM (if enabled)
+                if (useAllDebrid) {
+                    const adCacheData = adCacheResults[infoHashLower];
+                    
+                    let streamUrl = '';
+                    let cacheType = 'none';
+                    let streamError = null;
+                    
+                    // ✅ UNIFIED ENDPOINT: Always use /ad-stream/ with magnet link
+                    streamUrl = `${workerOrigin}/ad-stream/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
+                    
+                    if (adCacheData?.cached) {
+                        cacheType = 'global';
+                        console.log(`🅰️ ⚡ AllDebrid GLOBAL cache available: ${result.title}`);
+                    } else {
+                        cacheType = 'none';
+                    }
+                    
+                    const isCached = cacheType === 'global';
+                    const cachedIcon = isCached ? '⚡ ' : '📥🧲 ';
+                    const errorIcon = streamError ? '⚠️ ' : '';
+                    
+                    const streamName = [
+                        cachedIcon + errorIcon + '🅰️ ',
+                        `[${result.source}]`,
+                        languageIcon,
+                        qualitySymbol,
+                        qualityDisplay,
+                        `👥 ${result.seeders || 0}/${result.leechers || 0}`,
+                        result.size && result.size !== 'Unknown' ? `💾 ${result.size}` : null
+                    ].filter(Boolean).join(' | ');
+                    
+                    let cacheInfoText;
+                    if (cacheType === 'global') {
+                        cacheInfoText = '🔗 Streaming da cache Globale AllDebrid';
+                    } else {
+                        cacheInfoText = '📥🧲 Aggiungi a AllDebrid';
+                    }
+                    
+                    const streamTitle = [
+                        `🎬 ${result.title}`,
+                        `📡 ${result.source} | 💾 ${result.size} | 👥 ${result.seeders || 0} seeds`,
+                        cacheInfoText,
+                        result.categories?.[0] ? `📂 ${result.categories[0]}` : '',
+                    ].filter(Boolean).join('\n');
+                    
+                    streams.push({
+                        name: streamName,
+                        title: streamTitle,
+                        url: streamUrl,
+                        behaviorHints: {
+                            bingeGroup: 'uindex-alldebrid-optimized',
+                            notWebReady: false
+                        },
+                        _meta: { 
+                            infoHash: result.infoHash, 
+                            cached: isCached, 
+                            cacheSource: cacheType, 
+                            service: 'alldebrid',
+                            originalSize: result.size, 
+                            quality: result.quality, 
+                            seeders: result.seeders 
+                        }
+                    });
+                }
+                
                 // ✅ P2P STREAM (if no debrid service enabled)
-                if (!useRealDebrid && !useTorbox) {
+                if (!useRealDebrid && !useTorbox && !useAllDebrid) {
                     const streamName = [
                         '[P2P]',
                         `[${result.source}]`,
@@ -3739,6 +3944,139 @@ export default async function handler(req, res) {
                 
                 // Generic error: show failed placeholder
                 console.log(`[Torbox] Generic error, showing failed video`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+            }
+        }
+
+        // ✅ UNIFIED AllDebrid Stream Endpoint
+        if (url.pathname.startsWith('/ad-stream/')) {
+            const pathParts = url.pathname.split('/');
+            const encodedConfigStr = pathParts[2];
+            const encodedMagnet = pathParts[3];
+            
+            let userConfig = {};
+            try {
+                if (!encodedConfigStr) throw new Error("Configurazione mancante nell'URL.");
+                userConfig = JSON.parse(atob(encodedConfigStr));
+            } catch (e) {
+                console.error(`[AllDebrid] Config error: ${e.message}`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+            }
+
+            if (!userConfig.alldebrid_key) {
+                console.error(`[AllDebrid] API key not configured`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_access_v2.mp4`);
+            }
+
+            if (!encodedMagnet) {
+                console.error(`[AllDebrid] Invalid magnet link`);
+                return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+            }
+
+            try {
+                const magnetLink = decodeURIComponent(encodedMagnet);
+                const infoHash = extractInfoHash(magnetLink);
+                if (!infoHash) throw new Error('Invalid magnet link or missing info hash.');
+
+                const alldebrid = new AllDebrid(userConfig.alldebrid_key);
+                
+                console.log(`[AllDebrid] Resolving ${infoHash}`);
+                
+                // STEP 1: Upload magnet (AllDebrid will use cache if available)
+                console.log(`[AllDebrid] Uploading magnet (will use cache if available)`);
+                const uploadResponse = await alldebrid.uploadMagnet(magnetLink);
+                const magnetId = uploadResponse.id;
+                
+                if (!magnetId) {
+                    throw new Error('Failed to get magnet ID from AllDebrid');
+                }
+                
+                // STEP 2: Get magnet status
+                console.log(`[AllDebrid] Checking magnet status: ${magnetId}`);
+                const magnetStatus = await alldebrid.getMagnetStatus(magnetId);
+                
+                // Extract status from response
+                const status = magnetStatus.status || magnetStatus.statusCode;
+                
+                // STEP 3: Check if ready
+                if (status === 'Ready' || status === 4) {
+                    // ✅ READY: Get files and unrestrict
+                    console.log(`[AllDebrid] Magnet ready, getting files...`);
+                    
+                    const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm'];
+                    const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
+                    
+                    // Extract files from magnetStatus
+                    const files = magnetStatus.links || [];
+                    
+                    if (files.length === 0) {
+                        console.log(`[AllDebrid] No files found`);
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                    }
+                    
+                    // Find video files
+                    const videos = files
+                        .filter(file => {
+                            const filename = file.filename || file.link || '';
+                            return videoExtensions.some(ext => filename.toLowerCase().endsWith(ext));
+                        })
+                        .filter(file => {
+                            const filename = file.filename || file.link || '';
+                            const lowerName = filename.toLowerCase();
+                            const size = file.size || 0;
+                            return !junkKeywords.some(junk => lowerName.includes(junk)) || size > 250 * 1024 * 1024;
+                        })
+                        .sort((a, b) => (b.size || 0) - (a.size || 0));
+                    
+                    const targetFile = videos[0];
+                    
+                    if (!targetFile) {
+                        console.log(`[AllDebrid] No video file found`);
+                        // Check if it's a RAR archive
+                        if (files.some(f => (f.filename || '').endsWith('.rar') || (f.filename || '').endsWith('.zip'))) {
+                            console.log(`[AllDebrid] Failed: RAR archive`);
+                            return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                        }
+                        return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                    }
+                    
+                    // STEP 4: Unlock the link
+                    const fileLink = targetFile.link;
+                    console.log(`[AllDebrid] Unlocking link for: ${targetFile.filename}`);
+                    const unrestrictedUrl = await alldebrid.unlockLink(fileLink);
+                    
+                    console.log(`[AllDebrid] Redirecting to stream (direct, no MediaFlow)`);
+                    return res.redirect(302, unrestrictedUrl);
+                    
+                } else if (status === 'Downloading' || status === 1 || status === 'Processing' || status === 2) {
+                    // ⏳ DOWNLOADING/PROCESSING: Show placeholder video
+                    console.log(`[AllDebrid] Magnet is downloading/processing (status: ${status})...`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/downloading_v2.mp4`);
+                    
+                } else {
+                    // ❌ ERROR or UNKNOWN: Show failed video
+                    console.log(`[AllDebrid] Unexpected status: ${status}`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                }
+                
+            } catch (error) {
+                console.error('🅰️ ❌ AllDebrid stream error:', error);
+                
+                // Handle specific errors with placeholder videos
+                const errorMsg = error.message?.toLowerCase() || '';
+                
+                if (errorMsg.includes('400') || errorMsg.includes('not found') || errorMsg.includes('invalid')) {
+                    console.log(`[AllDebrid] Torrent not available (400/404)`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
+                }
+                
+                if (errorMsg.includes('rar') || errorMsg.includes('zip')) {
+                    console.log(`[AllDebrid] Archive format not supported`);
+                    return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/failed_rar_v2.mp4`);
+                }
+                
+                // Generic error: show failed placeholder
+                console.log(`[AllDebrid] Generic error, showing failed video`);
                 return res.redirect(302, `${TORRENTIO_VIDEO_BASE}/videos/download_failed_v2.mp4`);
             }
         }
