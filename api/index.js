@@ -1992,8 +1992,8 @@ async function handleStream(type, id, config, workerOrigin) {
     const startTime = Date.now();
     
     try {
-        // Usa la configurazione passata, con fallback alle variabili d'ambiente
-        const tmdbKey = config.tmdb_key;
+        // ✅ TMDB API Key (hardcoded)
+        const tmdbKey = '5462f78469f3d80bf5201645294c16e4';
         
         // ✅ Use debrid services factory (supports RD, Torbox, and AllDebrid)
         const debridServices = createDebridServices(config);
