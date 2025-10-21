@@ -1391,33 +1391,34 @@ class Torbox {
     }
 
     async addTorrent(magnetLink) {
+        // Use URLSearchParams exactly like Torrentio
+        const data = new URLSearchParams();
+        data.append('magnet', magnetLink);
+        data.append('allow_zip', 'false'); // Don't allow zip files
+        
         const response = await fetch(`${this.baseUrl}/torrents/createtorrent`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${this.apiKey}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/x-www-form-urlencoded'
             },
-            body: JSON.stringify({
-                magnet: magnetLink,
-                seed: 1, // Enable seeding
-                allow_zip: false // Don't allow zip files
-            })
+            body: data.toString()
         });
 
-        const data = await response.json();
+        const responseData = await response.json();
         
         // Handle errors gracefully
         if (!response.ok) {
             // If it's a 400, it might be because torrent is not cached
             // Return error details so we can handle it upstream
-            throw new Error(`Torbox API error: ${response.status} - ${data.error || data.detail || 'Unknown error'}`);
+            throw new Error(`Torbox API error: ${response.status} - ${responseData.error || responseData.detail || 'Unknown error'}`);
         }
 
-        if (!data.success) {
-            throw new Error(`Torbox error: ${data.error || 'Unknown error'}`);
+        if (!responseData.success) {
+            throw new Error(`Torbox error: ${responseData.error || 'Unknown error'}`);
         }
         
-        return data.data;
+        return responseData.data;
     }
 
     async getTorrents() {
