@@ -3603,6 +3603,7 @@ export default async function handler(req, res) {
             const pathParts = url.pathname.split('/');
             const encodedConfigStr = pathParts[2];
             const encodedMagnet = pathParts[3];
+            const workerOrigin = url.origin; // For placeholder video URLs
             
             const htmlResponse = (title, message, isError = false) => `
                 <!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title}</title>
