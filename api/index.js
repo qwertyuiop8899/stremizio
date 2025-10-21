@@ -1306,44 +1306,15 @@ class Torbox {
             if (data.success && data.data) {
                 hashes.forEach(hash => {
                     const cacheInfo = data.data[hash.toLowerCase()];
-                    const isCached = cacheInfo && cacheInfo.cached === true;
-                    let downloadLink = null;
-                    let isActuallyCachedAndStreamable = false;
                     
-                    if (isCached && cacheInfo.files && cacheInfo.files.length > 0) {
-                        const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
-                        const junkKeywords = ['sample', 'trailer', 'extra', 'bonus', 'extras'];
-                        
-                        let bestFile = null;
-                        
-                        for (const file of cacheInfo.files) {
-                            const lowerName = file.name.toLowerCase();
-                            
-                            const hasVideoExtension = videoExtensions.some(ext => lowerName.endsWith(ext));
-                            if (!hasVideoExtension) continue;
-                            
-                            const isLikelyJunk = junkKeywords.some(junk => lowerName.includes(junk)) && file.size < 250 * 1024 * 1024;
-                            if (isLikelyJunk) continue;
-                            
-                            if (!bestFile || file.size > bestFile.size) {
-                                bestFile = file;
-                            }
-                        }
-                        
-                        if (bestFile) {
-                            // Store the hash and best file info for later retrieval
-                            downloadLink = hash; // We'll use this to request the actual download later
-                            isActuallyCachedAndStreamable = true;
-                        } else {
-                            console.warn(`⚠️ Torrent ${hash} is in Torbox cache but no suitable video file found.`);
-                        }
-                    }
+                    // ✅ EXACT TORRENTIO LOGIC: Consider cached if Torbox says it's cached
+                    // Let /torbox-stream endpoint handle actual file selection and readiness
+                    const isCached = cacheInfo && cacheInfo.cached === true;
                     
                     results[hash.toLowerCase()] = {
-                        cached: isActuallyCachedAndStreamable,
-                        downloadLink: downloadLink,
-                        service: 'Torbox',
-                        torboxData: cacheInfo // Store original data for file selection
+                        cached: isCached,  // Simple check like Torrentio
+                        downloadLink: null,  // Not needed, /torbox-stream handles everything
+                        service: 'Torbox'
                     };
                 });
             }
@@ -2504,7 +2475,8 @@ async function handleStream(type, id, config, workerOrigin) {
                     // The endpoint will handle: global cache, personal cache, or add new torrent
                     streamUrl = `${workerOrigin}/torbox-stream/${encodedConfig}/${encodeURIComponent(result.magnetLink)}`;
                     
-                    if (torboxCacheData?.cached && torboxCacheData.downloadLink) {
+                    // ✅ EXACT TORRENTIO LOGIC: If Torbox says cached, show as cached
+                    if (torboxCacheData?.cached) {
                         cacheType = 'global';
                         console.log(`📦 ⚡ Torbox GLOBAL cache available: ${result.title}`);
                     } else if (torboxUserTorrent && torboxUserTorrent.download_finished === true) {
