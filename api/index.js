@@ -3695,10 +3695,10 @@ export default async function handler(req, res) {
                     }
                 }
                 
-                // STEP 3: Check torrent status (like Torrentio statusReady/statusDownloading)
-                const statusReady = torrent?.download_present;  // ← CRITICAL: use download_present not download_finished!
-                const statusDownloading = !statusReady && torrent?.active;
-                const statusError = !torrent?.active && !torrent?.download_finished;
+                // STEP 3: Check torrent status (EXACT Torrentio logic)
+                const statusReady = torrent?.download_present;
+                const statusError = (!torrent?.active && !torrent?.download_finished) || torrent?.download_state === 'error';
+                const statusDownloading = (!statusReady && !statusError) || !!torrent?.queued_id;
                 
                 if (statusReady) {
                     // ✅ READY: Unrestrict and stream
